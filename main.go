@@ -510,6 +510,8 @@ func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[
 
 func cmdLog(args []string) error {
 	fs := flag.NewFlagSet("log", flag.ExitOnError)
+	limitFlag := fs.Int("limit", 100, "Maximum log entries to collect (<=0 for unlimited)")
+	timeoutFlag := fs.Duration("timeout", 15*time.Second, "Maximum time to wait for log events (0 disables)")
 	fs.Parse(args)
 	if fs.NArg() < 1 {
 		return errors.New("usage: cdp log <name> [\"setup script\"]")
@@ -519,6 +521,8 @@ func cmdLog(args []string) error {
 	if fs.NArg() > 1 {
 		script = fs.Arg(1)
 	}
+	limit := *limitFlag
+	timeout := *timeoutFlag
 
 	st, err := store.Load()
 	if err != nil {
@@ -560,23 +564,59 @@ func cmdLog(args []string) error {
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
 
-	fmt.Println("Streaming console output. Ctrl+C to stop...")
+	var timer *time.Timer
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timeoutCh = timer.C
+		defer timer.Stop()
+	}
 
-	go func() {
-		<-sigCh
-		cancel()
-	}()
+	limitInfo := "unlimited"
+	if limit > 0 {
+		limitInfo = strconv.Itoa(limit)
+	}
+	timeoutInfo := "disabled"
+	if timeout > 0 {
+		timeoutInfo = timeout.String()
+	}
+	fmt.Printf("Collecting console output (limit=%s, timeout=%s). Ctrl+C to stop early.\n", limitInfo, timeoutInfo)
 
+	logCount := 0
+	exitReason := ""
+
+loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			if exitReason == "" {
+				exitReason = "context cancelled"
+			}
+			break loop
 		case evt := <-events:
 			if err := handleLogEvent(ctx, handle.client, evt); err != nil {
 				fmt.Fprintln(os.Stderr, "log handler:", err)
 			}
+			logCount++
+			if limit > 0 && logCount >= limit {
+				exitReason = fmt.Sprintf("limit reached (%d entries)", limit)
+				break loop
+			}
+		case <-timeoutCh:
+			exitReason = fmt.Sprintf("timeout reached (%s)", timeout)
+			break loop
+		case <-sigCh:
+			exitReason = "interrupted"
+			cancel()
+			break loop
 		}
 	}
+
+	if exitReason == "" {
+		exitReason = "completed"
+	}
+	fmt.Printf("Log stream ended (%s). Entries: %d\n", exitReason, logCount)
+	return nil
 }
 
 func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) error {
