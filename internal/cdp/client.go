@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,7 @@ func Dial(ctx context.Context, wsURL string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.SetReadLimit(math.MaxInt64)
 	readCtx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		conn:          conn,

@@ -75,22 +75,26 @@ Usage:
 }
 
 func cmdConnect(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: cdp connect <name> --port --url")
+	}
+	name := args[0]
+
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", 0, "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
-	fs.Parse(args)
-	if fs.NArg() != 1 {
-		return errors.New("connect requires a session name")
-	}
+	fs.Parse(args[1:])
 	if *port == 0 {
 		return errors.New("--port is required")
 	}
 	if *targetURL == "" {
 		return errors.New("--url is required")
 	}
-	name := fs.Arg(0)
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -147,12 +151,15 @@ func cmdEval(args []string) error {
 	pretty := fs.Bool("pretty", false, "Pretty print JSON output")
 	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
 	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
-	fs.Parse(args)
-	if fs.NArg() < 2 {
+	if len(args) < 2 {
 		return errors.New("usage: cdp eval <name> \"expr\"")
 	}
-	name := fs.Arg(0)
-	expression := fs.Arg(1)
+	name := args[0]
+	expression := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -184,12 +191,15 @@ func cmdDOM(args []string) error {
 	fs := flag.NewFlagSet("dom", flag.ExitOnError)
 	pretty := fs.Bool("pretty", true, "Pretty print output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	fs.Parse(args)
-	if fs.NArg() < 2 {
+	if len(args) < 2 {
 		return errors.New("usage: cdp dom <name> \".selector\"")
 	}
-	name := fs.Arg(0)
-	selector := fs.Arg(1)
+	name := args[0]
+	selector := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -232,12 +242,15 @@ func cmdDOM(args []string) error {
 func cmdStyles(args []string) error {
 	fs := flag.NewFlagSet("styles", flag.ExitOnError)
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	fs.Parse(args)
-	if fs.NArg() < 2 {
+	if len(args) < 2 {
 		return errors.New("usage: cdp styles <name> \".selector\"")
 	}
-	name := fs.Arg(0)
-	selector := fs.Arg(1)
+	name := args[0]
+	selector := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -297,11 +310,14 @@ func cmdScreenshot(args []string) error {
 	selector := fs.String("selector", "", "CSS selector to crop")
 	output := fs.String("output", "screenshot.png", "Output file path")
 	timeout := fs.Duration("timeout", 15*time.Second, "Command timeout")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
+	if len(args) < 1 {
 		return errors.New("usage: cdp screenshot <name> [--selector ...]")
 	}
-	name := fs.Arg(0)
+	name := args[0]
+	fs.Parse(args[1:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 
 	st, err := store.Load()
 	if err != nil {
