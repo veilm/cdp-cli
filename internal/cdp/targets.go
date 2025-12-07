@@ -64,3 +64,23 @@ func FindTarget(targets []TargetInfo, rawURL string) (TargetInfo, bool) {
 	}
 	return TargetInfo{}, false
 }
+
+// ActivateTarget asks the browser to focus a tab.
+func ActivateTarget(ctx context.Context, host string, port int, targetID string) error {
+	endpoint := fmt.Sprintf("http://%s:%d/json/activate/%s", host, port, targetID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("activate target: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}

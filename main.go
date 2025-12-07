@@ -76,7 +76,8 @@ Usage:
 	  cdp rect <name> "CSS selector"
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
-	  cdp tabs [--host 127.0.0.1 --port 9222] [--plain]
+	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
+	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
 	  cdp targets
   cdp close <name>`)
 }
@@ -89,7 +90,7 @@ func cmdConnect(args []string) error {
 
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	host := fs.String("host", "127.0.0.1", "DevTools host")
-	port := fs.Int("port", 0, "DevTools port")
+	port := fs.Int("port", portDefault(0), "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
 	fs.Parse(args[1:])
@@ -677,9 +678,23 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 }
 
 func cmdTabs(args []string) error {
-	fs := flag.NewFlagSet("tabs", flag.ExitOnError)
+	if len(args) == 0 {
+		return errors.New("usage: cdp tabs <command> (list|switch)")
+	}
+	switch args[0] {
+	case "list":
+		return cmdTabsList(args[1:])
+	case "switch":
+		return cmdTabsSwitch(args[1:])
+	default:
+		return fmt.Errorf("unknown tabs command %q (expected list or switch)", args[0])
+	}
+}
+
+func cmdTabsList(args []string) error {
+	fs := flag.NewFlagSet("tabs list", flag.ExitOnError)
 	host := fs.String("host", "127.0.0.1", "DevTools host")
-	port := fs.Int("port", 9222, "DevTools port")
+	port := fs.Int("port", portDefault(9222), "DevTools port")
 	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
@@ -691,15 +706,9 @@ func cmdTabs(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	targets, err := cdp.ListTargets(ctx, *host, *port)
+	tabs, err := fetchTabs(ctx, *host, *port)
 	if err != nil {
 		return err
-	}
-	tabs := make([]cdp.TargetInfo, 0, len(targets))
-	for _, target := range targets {
-		if target.Type == "page" {
-			tabs = append(tabs, target)
-		}
 	}
 
 	if *plain {
@@ -724,6 +733,86 @@ func cmdTabs(args []string) error {
 	}
 	fmt.Println(output)
 	return nil
+}
+
+func cmdTabsSwitch(args []string) error {
+	fs := flag.NewFlagSet("tabs switch", flag.ExitOnError)
+	host := fs.String("host", "127.0.0.1", "DevTools host")
+	port := fs.Int("port", portDefault(9222), "DevTools port")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: cdp tabs switch <index|id|pattern>")
+	}
+	targetRef := fs.Arg(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	tabs, err := fetchTabs(ctx, *host, *port)
+	if err != nil {
+		return err
+	}
+	if len(tabs) == 0 {
+		return errors.New("no tabs available (use 'cdp tabs list' to double-check)")
+	}
+
+	tab, err := matchTab(tabs, targetRef)
+	if err != nil {
+		return err
+	}
+
+	if err := cdp.ActivateTarget(ctx, *host, *port, tab.ID); err != nil {
+		return err
+	}
+	title := tab.Title
+	if strings.TrimSpace(title) == "" {
+		title = "<untitled>"
+	}
+	fmt.Printf("Activated tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+	return nil
+}
+
+func fetchTabs(ctx context.Context, host string, port int) ([]cdp.TargetInfo, error) {
+	targets, err := cdp.ListTargets(ctx, host, port)
+	if err != nil {
+		return nil, err
+	}
+	tabs := make([]cdp.TargetInfo, 0, len(targets))
+	for _, target := range targets {
+		if target.Type == "page" {
+			tabs = append(tabs, target)
+		}
+	}
+	return tabs, nil
+}
+
+func matchTab(tabs []cdp.TargetInfo, ref string) (cdp.TargetInfo, error) {
+	if idx, err := strconv.Atoi(ref); err == nil {
+		if idx <= 0 || idx > len(tabs) {
+			return cdp.TargetInfo{}, fmt.Errorf("index %d is out of range (tabs available: %d)", idx, len(tabs))
+		}
+		return tabs[idx-1], nil
+	}
+	for _, tab := range tabs {
+		if tab.ID == ref {
+			return tab, nil
+		}
+	}
+	lowerRef := strings.ToLower(ref)
+	matches := make([]cdp.TargetInfo, 0, 2)
+	for _, tab := range tabs {
+		if strings.Contains(strings.ToLower(tab.URL), lowerRef) || strings.Contains(strings.ToLower(tab.Title), lowerRef) {
+			matches = append(matches, tab)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return cdp.TargetInfo{}, fmt.Errorf("pattern %q matches multiple tabs; be more specific", ref)
+	}
+	return cdp.TargetInfo{}, fmt.Errorf("no tab matches %q (try 'cdp tabs list')", ref)
 }
 
 func cmdTargets(args []string) error {
@@ -893,6 +982,25 @@ func defaultPretty() bool {
 	default:
 		return false
 	}
+}
+
+func envDefaultPort() (int, bool) {
+	raw := strings.TrimSpace(os.Getenv("CDP_PORT"))
+	if raw == "" {
+		return 0, false
+	}
+	val, err := strconv.Atoi(raw)
+	if err != nil || val <= 0 {
+		return 0, false
+	}
+	return val, true
+}
+
+func portDefault(fallback int) int {
+	if val, ok := envDefaultPort(); ok {
+		return val
+	}
+	return fallback
 }
 
 func readScriptFile(path string) (string, error) {
