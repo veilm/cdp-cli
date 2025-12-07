@@ -1,13 +1,17 @@
 # cdp-cli
 
-A tiny Chrome DevTools Protocol helper for poking at live tabs (DOM snapshots, styles, screenshots, console streaming, etc.).
+A tiny Chrome DevTools Protocol helper for poking at live tabs (DOM snapshots, styles/rect metrics, screenshots, console streaming, etc.).
 
 ```
 sudo ./install.sh
 cdp --help
 ```
 
-Use `cdp --help` (or `cdp <command> --help`) for switches and examples.
+Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highlights:
+
+- `cdp eval manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
+- `cdp rect manager ".selector"` prints a DOMRect snapshot.
+- Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 
 ## other similar projects
 - `https://github.com/myers/cdp-cli`: looks pretty good judging from the README.

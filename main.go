@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -47,6 +48,8 @@ func run() error {
 		return cmdDOM(args)
 	case "styles":
 		return cmdStyles(args)
+	case "rect":
+		return cmdRect(args)
 	case "screenshot":
 		return cmdScreenshot(args)
 	case "log":
@@ -65,12 +68,13 @@ func printUsage() {
 
 Usage:
   cdp connect <name> --port 9222 --url https://example
-  cdp eval <name> "JS expression" [--pretty] [--depth N]
-  cdp dom <name> "CSS selector"
-  cdp styles <name> "CSS selector"
-  cdp screenshot <name> [--selector ".composer"] [--output file.png]
-  cdp log <name> ["script to eval before streaming"]
-  cdp targets
+	  cdp eval <name> "JS expression" [--pretty] [--depth N]
+	  cdp dom <name> "CSS selector"
+	  cdp styles <name> "CSS selector"
+	  cdp rect <name> "CSS selector"
+	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
+	  cdp log <name> ["script to eval before streaming"]
+	  cdp targets
   cdp close <name>`)
 }
 
@@ -147,18 +151,57 @@ func cmdConnect(args []string) error {
 }
 
 func cmdEval(args []string) error {
-	fs := flag.NewFlagSet("eval", flag.ExitOnError)
-	pretty := fs.Bool("pretty", false, "Pretty print JSON output")
-	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
-	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
-	if len(args) < 2 {
+	if len(args) == 0 {
 		return errors.New("usage: cdp eval <name> \"expr\"")
 	}
 	name := args[0]
-	expression := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+
+	fs := flag.NewFlagSet("eval", flag.ExitOnError)
+	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
+	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
+	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
+	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
+	readStdin := fs.Bool("stdin", false, "Read JS from stdin")
+	fs.Parse(args[1:])
+
+	filePath := *file
+	useStdin := *readStdin
+	if filePath == "-" {
+		if useStdin {
+			return errors.New("use either --file or --stdin, not both")
+		}
+		useStdin = true
+		filePath = ""
+	}
+	if useStdin && filePath != "" {
+		return errors.New("use either --file or --stdin, not both")
+	}
+
+	var expression string
+	switch {
+	case filePath != "":
+		src, err := readScriptFile(filePath)
+		if err != nil {
+			return err
+		}
+		expression = src
+	case useStdin:
+		src, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		expression = string(src)
+	default:
+		if fs.NArg() == 0 {
+			return errors.New("missing JS expression (pass literal, --file, or --stdin)")
+		}
+		expression = fs.Arg(0)
+		if fs.NArg() > 1 {
+			return fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+		}
+	}
+	if strings.TrimSpace(expression) == "" {
+		return errors.New("JS expression is empty")
 	}
 
 	st, err := store.Load()
@@ -290,6 +333,60 @@ func cmdStyles(args []string) error {
                 width: rect.width,
                 height: rect.height,
             }
+        };
+    })()`, strconv.Quote(selector))
+
+	value, err := handle.client.Evaluate(ctx, expression)
+	if err != nil {
+		return err
+	}
+	output, err := format.JSON(value, true, -1)
+	if err != nil {
+		return err
+	}
+	fmt.Println(output)
+	return nil
+}
+
+func cmdRect(args []string) error {
+	fs := flag.NewFlagSet("rect", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) < 2 {
+		return errors.New("usage: cdp rect <name> \".selector\"")
+	}
+	name := args[0]
+	selector := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) { return null; }
+        const rect = el.getBoundingClientRect();
+        return {
+            x: rect.x,
+            y: rect.y,
+            top: rect.top,
+            left: rect.left,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
         };
     })()`, strconv.Quote(selector))
 
@@ -693,4 +790,22 @@ func rewriteWebSocketURL(raw, host string, port int) string {
 		u.Host = fmt.Sprintf("%s:%d", host, port)
 	}
 	return u.String()
+}
+
+func defaultPretty() bool {
+	val := strings.ToLower(strings.TrimSpace(os.Getenv("CDP_PRETTY")))
+	switch val {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func readScriptFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return string(data), nil
 }
