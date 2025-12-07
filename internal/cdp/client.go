@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -255,11 +256,27 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (interface{}, 
 		return nil, err
 	}
 	if res.ExceptionDetails != nil {
+		msg := strings.TrimSpace(res.ExceptionDetails.Text)
+		var detail string
 		if res.ExceptionDetails.Exception != nil {
-			detail, _ := c.RemoteObjectValue(ctx, *res.ExceptionDetails.Exception)
-			return nil, fmt.Errorf("runtime exception: %s", detail)
+			if d, err := c.RemoteObjectValue(ctx, *res.ExceptionDetails.Exception); err == nil && d != nil {
+				if m, ok := d.(map[string]interface{}); !ok || len(m) > 0 {
+					detail = strings.TrimSpace(fmt.Sprint(d))
+				}
+			}
+			if detail == "" {
+				detail = strings.TrimSpace(res.ExceptionDetails.Exception.Description)
+			}
 		}
-		return nil, errors.New(res.ExceptionDetails.Text)
+		if msg == "" && detail != "" {
+			msg = detail
+		}
+		if msg == "" {
+			msg = "runtime exception"
+		} else if detail != "" && detail != msg {
+			msg = fmt.Sprintf("%s (%s)", msg, detail)
+		}
+		return nil, errors.New(msg)
 	}
 	return c.RemoteObjectValue(ctx, res.Result)
 }
@@ -284,6 +301,20 @@ func (c *Client) RemoteObjectValue(ctx context.Context, obj RemoteObject) (inter
 		err := c.Call(ctx, "Runtime.callFunctionOn", map[string]interface{}{
 			"objectId": obj.ObjectID,
 			"functionDeclaration": `function() {
+                try {
+                    if (typeof DOMRect !== 'undefined' && (this instanceof DOMRect || this instanceof DOMRectReadOnly)) {
+                        return {
+                            x: this.x,
+                            y: this.y,
+                            width: this.width,
+                            height: this.height,
+                            top: this.top,
+                            right: this.right,
+                            bottom: this.bottom,
+                            left: this.left,
+                        };
+                    }
+                } catch (e) {}
                 try {
                     const json = JSON.stringify(this);
                     if (json !== undefined) {
