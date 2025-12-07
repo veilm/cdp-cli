@@ -3,7 +3,8 @@
 A tiny Chrome DevTools Protocol helper for poking at live tabs (DOM snapshots, styles/rect metrics, screenshots, console streaming, etc.).
 
 ```
-sudo ./install.sh
+git clone https://github.com/veilm/cdp-cli
+./cdp-cli/install.sh # will prompt for sudo. requires Go only
 cdp --help
 ```
 
