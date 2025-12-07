@@ -54,6 +54,8 @@ func run() error {
 		return cmdScreenshot(args)
 	case "log":
 		return cmdLog(args)
+	case "tabs":
+		return cmdTabs(args)
 	case "targets":
 		return cmdTargets(args)
 	case "close":
@@ -74,6 +76,7 @@ Usage:
 	  cdp rect <name> "CSS selector"
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
+	  cdp tabs [--host 127.0.0.1 --port 9222] [--plain]
 	  cdp targets
   cdp close <name>`)
 }
@@ -670,6 +673,56 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 		}
 		fmt.Printf("[%s/%s] %s%s\n", entry.Source, entry.Level, entry.Text, location)
 	}
+	return nil
+}
+
+func cmdTabs(args []string) error {
+	fs := flag.NewFlagSet("tabs", flag.ExitOnError)
+	host := fs.String("host", "127.0.0.1", "DevTools host")
+	port := fs.Int("port", 9222, "DevTools port")
+	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")
+	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	targets, err := cdp.ListTargets(ctx, *host, *port)
+	if err != nil {
+		return err
+	}
+	tabs := make([]cdp.TargetInfo, 0, len(targets))
+	for _, target := range targets {
+		if target.Type == "page" {
+			tabs = append(tabs, target)
+		}
+	}
+
+	if *plain {
+		if len(tabs) == 0 {
+			fmt.Println("No tabs found")
+			return nil
+		}
+		fmt.Printf("%-4s %-40s %s\n", "#", "TITLE", "URL")
+		for i, tab := range tabs {
+			title := tab.Title
+			if strings.TrimSpace(title) == "" {
+				title = "<untitled>"
+			}
+			fmt.Printf("%-4d %-40s %s\n", i+1, abbreviate(title, 40), tab.URL)
+		}
+		return nil
+	}
+
+	output, err := format.JSON(tabs, *pretty, -1)
+	if err != nil {
+		return err
+	}
+	fmt.Println(output)
 	return nil
 }
 

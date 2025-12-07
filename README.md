@@ -12,6 +12,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 
 - `cdp eval manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
 - `cdp rect manager ".selector"` prints a DOMRect snapshot.
+- `cdp tabs --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 
 ## other similar projects
