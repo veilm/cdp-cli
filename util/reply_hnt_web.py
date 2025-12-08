@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import textwrap
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         "--session",
         default="reply-hnt-web",
         help="Session name to register with cdp connect (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--most-recent-fork",
+        action="store_true",
+        help="Navigate to the most recent conversation fork before focusing the reply box",
     )
     return parser.parse_args()
 
@@ -152,6 +157,85 @@ def focus_reply(session: str) -> None:
     run_cdp(["cdp", "eval", session, script])
 
 
+def maybe_switch_to_most_recent_fork(session: str) -> Tuple[bool, Optional[str]]:
+    script = textwrap.dedent(
+        """
+        (() => {
+          const response = {
+            action: "focus",
+            reason: "default",
+            targetForkId: null,
+            currentConversationId: null,
+          };
+          try {
+            const convo = globalThis.__HINATA_ACTIVE_CONVERSATION;
+            if (!convo || !Array.isArray(convo.forks) || convo.forks.length === 0) {
+              response.reason = "no-forks";
+              return response;
+            }
+            const forks = convo.forks.filter(
+              (fork) => typeof fork === "string" && fork.trim() !== ""
+            );
+            if (forks.length === 0) {
+              response.reason = "no-valid-forks";
+              return response;
+            }
+            const latest = forks[forks.length - 1];
+            response.targetForkId = latest;
+            const pathname =
+              globalThis.location && typeof globalThis.location.pathname === "string"
+                ? globalThis.location.pathname
+                : "";
+            const match = pathname.match(/\\/c\\/([^/]+)/);
+            const current = match ? match[1] : "";
+            response.currentConversationId = current || null;
+            if (latest && current && latest !== current) {
+              const url = new URL(globalThis.location.href);
+              const segments = url.pathname.split("/");
+              const idx = segments.indexOf("c");
+              if (idx >= 0 && idx + 1 < segments.length) {
+                segments[idx + 1] = latest;
+                url.pathname = segments.join("/");
+              } else {
+                url.pathname = `/c/${latest}`;
+              }
+              response.action = "navigated";
+              response.reason = "navigated-to-fork";
+              globalThis.location.assign(url.toString());
+            } else {
+              response.reason = latest ? "already-on-fork" : "missing-latest";
+            }
+            return response;
+          } catch (err) {
+            response.reason = "error";
+            response.error = err && err.message ? err.message : String(err);
+            return response;
+          }
+        })()
+        """
+    ).strip()
+    output = run_cdp(["cdp", "eval", session, script], capture=True).strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        print(
+            f"Warning: unable to parse CDP eval output for fork navigation: {exc}",
+            file=sys.stderr,
+        )
+        return True, None
+    if not isinstance(payload, dict):
+        return True, None
+    if payload.get("reason") == "error" and payload.get("error"):
+        print(
+            f"Warning: fork navigation failed inside the tab: {payload['error']}",
+            file=sys.stderr,
+        )
+    if payload.get("action") == "navigated":
+        target = payload.get("targetForkId") or payload.get("currentConversationId") or "latest fork"
+        return False, f"Tab activated and navigated to fork {target}."
+    return True, None
+
+
 def main() -> None:
     args = parse_args()
     tabs = list_tabs(args.host, args.port)
@@ -166,8 +250,15 @@ def main() -> None:
     if not target_url:
         raise SystemExit("Selected tab has no URL; cannot connect.")
     connect_session(args.session, target_url, args.host, args.port)
-    focus_reply(args.session)
-    print("Tab activated and textarea focused.")
+    should_focus = True
+    status_message: Optional[str] = None
+    if args.most_recent_fork:
+        should_focus, status_message = maybe_switch_to_most_recent_fork(args.session)
+    if should_focus:
+        focus_reply(args.session)
+        print(status_message or "Tab activated and textarea focused.")
+    else:
+        print(status_message or "Tab activated and navigated to the latest fork.")
 
 
 if __name__ == "__main__":
