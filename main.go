@@ -77,6 +77,7 @@ Usage:
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
 	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
+	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
 	  cdp targets
   cdp close <name>`)
@@ -679,15 +680,17 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 
 func cmdTabs(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cdp tabs <command> (list|switch)")
+		return errors.New("usage: cdp tabs <command> (list|switch|open)")
 	}
 	switch args[0] {
 	case "list":
 		return cmdTabsList(args[1:])
 	case "switch":
 		return cmdTabsSwitch(args[1:])
+	case "open":
+		return cmdTabsOpen(args[1:])
 	default:
-		return fmt.Errorf("unknown tabs command %q (expected list or switch)", args[0])
+		return fmt.Errorf("unknown tabs command %q (expected list, switch, or open)", args[0])
 	}
 }
 
@@ -770,6 +773,46 @@ func cmdTabsSwitch(args []string) error {
 		title = "<untitled>"
 	}
 	fmt.Printf("Activated tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+	return nil
+}
+
+func cmdTabsOpen(args []string) error {
+	fs := flag.NewFlagSet("tabs open", flag.ExitOnError)
+	host := fs.String("host", "127.0.0.1", "DevTools host")
+	port := fs.Int("port", portDefault(9222), "DevTools port")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	activate := fs.Bool("activate", true, "Activate the tab after opening")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: cdp tabs open <url>")
+	}
+	pageURL := strings.TrimSpace(fs.Arg(0))
+	if pageURL == "" {
+		return errors.New("url cannot be empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	tab, err := cdp.CreateTarget(ctx, *host, *port, pageURL)
+	if err != nil {
+		return err
+	}
+	if tab.URL == "" {
+		tab.URL = pageURL
+	}
+	title := tab.Title
+	if strings.TrimSpace(title) == "" {
+		title = "<untitled>"
+	}
+	if *activate {
+		if err := cdp.ActivateTarget(ctx, *host, *port, tab.ID); err != nil {
+			return err
+		}
+		fmt.Printf("Opened and activated tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+		return nil
+	}
+	fmt.Printf("Opened tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
 	return nil
 }
 

@@ -3,9 +3,11 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -42,6 +44,52 @@ func ListTargets(ctx context.Context, host string, port int) ([]TargetInfo, erro
 		return nil, err
 	}
 	return targets, nil
+}
+
+type httpStatusError struct {
+	status int
+	body   string
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("%s: %s", http.StatusText(e.status), e.body)
+}
+
+// CreateTarget requests a fresh tab pointing at the provided URL.
+func CreateTarget(ctx context.Context, host string, port int, targetURL string) (TargetInfo, error) {
+	endpoint := fmt.Sprintf("http://%s:%d/json/new?%s", host, port, url.QueryEscape(targetURL))
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	try := func(method string) (TargetInfo, error) {
+		req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+		if err != nil {
+			return TargetInfo{}, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return TargetInfo{}, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			return TargetInfo{}, httpStatusError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
+		}
+		var target TargetInfo
+		if err := json.NewDecoder(resp.Body).Decode(&target); err != nil {
+			return TargetInfo{}, err
+		}
+		return target, nil
+	}
+
+	target, err := try(http.MethodPut)
+	if err == nil {
+		return target, nil
+	}
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) && statusErr.status == http.StatusMethodNotAllowed {
+		return try(http.MethodGet)
+	}
+	return TargetInfo{}, fmt.Errorf("create target: %w", err)
 }
 
 // FindTarget tries to match a target by URL.
