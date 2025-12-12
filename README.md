@@ -13,6 +13,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp eval manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
 - `cdp rect manager ".selector"` prints a DOMRect snapshot.
 - `cdp tabs list --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
+- `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 - Set `CDP_PORT=9310` (or whatever you need) to change the default DevTools port used by commands that talk to the browser.
