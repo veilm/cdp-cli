@@ -60,6 +60,8 @@ func run() error {
 		return cmdLog(args)
 	case "network-log":
 		return cmdNetworkLog(args)
+	case "bring-to-front":
+		return cmdBringToFront(args)
 	case "tabs":
 		return cmdTabs(args)
 	case "targets":
@@ -83,6 +85,7 @@ Usage:
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
 	  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]
+	  cdp bring-to-front <name>
 	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
 	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
@@ -673,6 +676,44 @@ loop:
 		exitReason = "completed"
 	}
 	fmt.Printf("Log stream ended (%s). Entries: %d\n", exitReason, logCount)
+	return nil
+}
+
+func cmdBringToFront(args []string) error {
+	fs := newFlagSet("bring-to-front", "usage: cdp bring-to-front <name>")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp bring-to-front <name>")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
+	fs.Parse(args[1:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	if err := handle.client.Call(ctx, "Page.bringToFront", nil, nil); err != nil {
+		return err
+	}
+	fmt.Printf("Tab %s brought to front (%s)\n", name, abbreviate(handle.session.Title, 60))
 	return nil
 }
 
