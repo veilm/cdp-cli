@@ -58,8 +58,8 @@ func run() error {
 		return cmdTabs(args)
 	case "targets":
 		return cmdTargets(args)
-	case "close":
-		return cmdClose(args)
+	case "disconnect":
+		return cmdDisconnect(args)
 	default:
 		return fmt.Errorf("unknown command %q", cmd)
 	}
@@ -79,8 +79,9 @@ Usage:
 	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
 	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
+	  cdp tabs close <index|id|pattern> [--host 127.0.0.1 --port 9222]
 	  cdp targets
-  cdp close <name>
+  cdp disconnect <name>
 
 Run 'cdp <command> --help' for command-specific usage.`)
 }
@@ -725,7 +726,7 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 func cmdTabs(args []string) error {
 	if len(args) == 0 {
 		printTabsUsage()
-		return errors.New("usage: cdp tabs <command> (list|switch|open)")
+		return errors.New("usage: cdp tabs <command> (list|switch|open|close)")
 	}
 	if isHelpArg(args[0]) {
 		printTabsUsage()
@@ -738,17 +739,20 @@ func cmdTabs(args []string) error {
 		return cmdTabsSwitch(args[1:])
 	case "open":
 		return cmdTabsOpen(args[1:])
+	case "close":
+		return cmdTabsClose(args[1:])
 	default:
-		return fmt.Errorf("unknown tabs command %q (expected list, switch, or open)", args[0])
+		return fmt.Errorf("unknown tabs command %q (expected list, switch, open, or close)", args[0])
 	}
 }
 
 func printTabsUsage() {
-	fmt.Println("usage: cdp tabs <command> (list|switch|open)")
+	fmt.Println("usage: cdp tabs <command> (list|switch|open|close)")
 	fmt.Println("Commands:")
 	fmt.Println("  list    List available tabs from a remote debugging port")
 	fmt.Println("  switch  Activate a tab by index, id, or pattern")
 	fmt.Println("  open    Open a new tab")
+	fmt.Println("  close   Close a tab by reference or by saved session name")
 	fmt.Println("Run 'cdp tabs <command> --help' for details.")
 }
 
@@ -874,6 +878,76 @@ func cmdTabsOpen(args []string) error {
 	return nil
 }
 
+func cmdTabsClose(args []string) error {
+	fs := newFlagSet("tabs close", "usage: cdp tabs close <index|id|pattern> [--host --port]\nor:    cdp tabs close --session <name>")
+	host := fs.String("host", "127.0.0.1", "DevTools host")
+	port := fs.Int("port", portDefault(9222), "DevTools port")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	sessionName := fs.String("session", "", "Close tab by saved session name")
+	fs.Parse(args)
+
+	if *sessionName != "" {
+		if fs.NArg() != 0 {
+			return errors.New("usage: cdp tabs close --session <name>")
+		}
+		st, err := store.Load()
+		if err != nil {
+			return err
+		}
+		session, ok := st.Get(*sessionName)
+		if !ok {
+			return fmt.Errorf("unknown session %q", *sessionName)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		client, updated, err := attachSession(ctx, session)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		if err := client.Call(ctx, "Target.closeTarget", map[string]interface{}{"targetId": updated.TargetID}, nil); err != nil {
+			return err
+		}
+		title := updated.Title
+		if strings.TrimSpace(title) == "" {
+			title = "<untitled>"
+		}
+		fmt.Printf("Closed tab for session %s: %s (%s)\n", *sessionName, abbreviate(title, 60), updated.URL)
+		return nil
+	}
+
+	if fs.NArg() != 1 {
+		return errors.New("usage: cdp tabs close <index|id|pattern>")
+	}
+	targetRef := fs.Arg(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	tabs, err := fetchTabs(ctx, *host, *port)
+	if err != nil {
+		return err
+	}
+	if len(tabs) == 0 {
+		return errors.New("no tabs available (use 'cdp tabs list' to double-check)")
+	}
+	tab, err := matchTab(tabs, targetRef)
+	if err != nil {
+		return err
+	}
+	if err := cdp.CloseTarget(ctx, *host, *port, tab.ID); err != nil {
+		return err
+	}
+	title := tab.Title
+	if strings.TrimSpace(title) == "" {
+		title = "<untitled>"
+	}
+	fmt.Printf("Closed tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+	return nil
+}
+
 func fetchTabs(ctx context.Context, host string, port int) ([]cdp.TargetInfo, error) {
 	targets, err := cdp.ListTargets(ctx, host, port)
 	if err != nil {
@@ -956,15 +1030,15 @@ func abbreviate(text string, limit int) string {
 	return text[:limit-3] + "..."
 }
 
-func cmdClose(args []string) error {
-	fs := newFlagSet("close", "usage: cdp close <name>")
+func cmdDisconnect(args []string) error {
+	fs := newFlagSet("disconnect", "usage: cdp disconnect <name>")
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
 	}
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: cdp close <name>")
+		return errors.New("usage: cdp disconnect <name>")
 	}
 	name := fs.Arg(0)
 
@@ -972,26 +1046,13 @@ func cmdClose(args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ok := st.Get(name)
-	if !ok {
+	if _, ok := st.Get(name); !ok {
 		return fmt.Errorf("unknown session %q", name)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	client, updated, err := attachSession(ctx, session)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	if err := client.Call(ctx, "Target.closeTarget", map[string]interface{}{"targetId": updated.TargetID}, nil); err != nil {
-		return err
 	}
 	if _, err := st.Remove(name); err != nil {
 		return err
 	}
-	fmt.Println("Closed session", name)
+	fmt.Printf("Disconnected session %s (tab left open)\n", name)
 	return nil
 }
 
