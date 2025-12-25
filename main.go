@@ -11,9 +11,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/veilm/cdp-cli/internal/cdp"
@@ -54,6 +58,8 @@ func run() error {
 		return cmdScreenshot(args)
 	case "log":
 		return cmdLog(args)
+	case "network-log":
+		return cmdNetworkLog(args)
 	case "tabs":
 		return cmdTabs(args)
 	case "targets":
@@ -76,6 +82,7 @@ Usage:
 	  cdp rect <name> "CSS selector"
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
+	  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]
 	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
 	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
@@ -721,6 +728,422 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 		fmt.Printf("[%s/%s] %s%s\n", entry.Source, entry.Level, entry.Text, location)
 	}
 	return nil
+}
+
+func cmdNetworkLog(args []string) error {
+	fs := newFlagSet("network-log", "usage: cdp network-log <name> [options]")
+	dirFlag := fs.String("dir", "", "Directory for captured requests (default ./cdp-<name>-network-log)")
+	urlPattern := fs.String("url", "", "Regex to match request URLs")
+	methodPattern := fs.String("method", "", "Regex to match HTTP methods")
+	statusPattern := fs.String("status", "", "Regex to match HTTP status codes")
+	mimePattern := fs.String("mime", "", "Regex to match response Content-Type values")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return errors.New("usage: cdp network-log <name> [options]")
+	}
+	name := fs.Arg(0)
+
+	filters, err := buildNetworkFilters(*urlPattern, *methodPattern, *statusPattern, *mimePattern)
+	if err != nil {
+		return err
+	}
+
+	outputDir := *dirFlag
+	if outputDir == "" {
+		sessionFragment := sanitizePathFragment(name)
+		if sessionFragment == "" {
+			sessionFragment = "session"
+		}
+		outputDir = fmt.Sprintf("cdp-%s-network-log", sessionFragment)
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	opts := networkCaptureOptions{
+		Dir:     outputDir,
+		Filters: filters,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runNetworkCapture(ctx, handle.client, opts)
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	select {
+	case <-sigCh:
+		cancel()
+		err := <-errCh
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	case err := <-errCh:
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+}
+
+type networkCaptureOptions struct {
+	Dir     string
+	Filters networkFilters
+}
+
+type networkFilters struct {
+	url    *regexp.Regexp
+	method *regexp.Regexp
+	status *regexp.Regexp
+	mime   *regexp.Regexp
+}
+
+func buildNetworkFilters(urlPattern, methodPattern, statusPattern, mimePattern string) (networkFilters, error) {
+	var filters networkFilters
+	var err error
+	if urlPattern != "" {
+		filters.url, err = regexp.Compile(urlPattern)
+		if err != nil {
+			return filters, fmt.Errorf("invalid --url regex: %w", err)
+		}
+	}
+	if methodPattern != "" {
+		filters.method, err = regexp.Compile(methodPattern)
+		if err != nil {
+			return filters, fmt.Errorf("invalid --method regex: %w", err)
+		}
+	}
+	if statusPattern != "" {
+		filters.status, err = regexp.Compile(statusPattern)
+		if err != nil {
+			return filters, fmt.Errorf("invalid --status regex: %w", err)
+		}
+	}
+	if mimePattern != "" {
+		filters.mime, err = regexp.Compile(mimePattern)
+		if err != nil {
+			return filters, fmt.Errorf("invalid --mime regex: %w", err)
+		}
+	}
+	return filters, nil
+}
+
+func (f networkFilters) match(url, method, status, mime string) bool {
+	if f.url != nil && !f.url.MatchString(url) {
+		return false
+	}
+	if f.method != nil && !f.method.MatchString(method) {
+		return false
+	}
+	if f.status != nil && !f.status.MatchString(status) {
+		return false
+	}
+	if f.mime != nil && !f.mime.MatchString(mime) {
+		return false
+	}
+	return true
+}
+
+type fetchRequestPausedEvent struct {
+	RequestID          string             `json:"requestId"`
+	Request            fetchRequestInfo   `json:"request"`
+	ResponseStatusCode *int               `json:"responseStatusCode"`
+	ResponseHeaders    []fetchHeaderEntry `json:"responseHeaders"`
+	RequestStage       string             `json:"requestStage"`
+}
+
+type fetchRequestInfo struct {
+	URL      string                 `json:"url"`
+	Method   string                 `json:"method"`
+	Headers  map[string]interface{} `json:"headers"`
+	PostData string                 `json:"postData"`
+}
+
+type fetchHeaderEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func runNetworkCapture(ctx context.Context, client *cdp.Client, opts networkCaptureOptions) error {
+	if err := client.Call(ctx, "Network.enable", nil, nil); err != nil {
+		return err
+	}
+	if err := client.Call(ctx, "Fetch.enable", map[string]interface{}{
+		"patterns": []map[string]interface{}{
+			{
+				"urlPattern":   "*",
+				"requestStage": "Response",
+			},
+		},
+		"handleAuthRequests": false,
+	}, nil); err != nil {
+		return err
+	}
+	defer func() {
+		disableCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		client.Call(disableCtx, "Fetch.disable", nil, nil)
+	}()
+
+	var wg sync.WaitGroup
+	unsubscribe := client.SubscribeEvents(func(evt cdp.Event) {
+		if evt.Method != "Fetch.requestPaused" {
+			return
+		}
+		var payload fetchRequestPausedEvent
+		if err := json.Unmarshal(evt.Params, &payload); err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		wg.Add(1)
+		go func(event fetchRequestPausedEvent) {
+			defer wg.Done()
+			processFetchPaused(ctx, client, opts, event)
+		}(payload)
+	})
+	defer func() {
+		unsubscribe()
+		wg.Wait()
+	}()
+
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type networkCapture struct {
+	Timestamp         time.Time
+	RequestID         string
+	URL               string
+	Method            string
+	Stage             string
+	Status            string
+	ContentType       string
+	RequestHeaders    map[string]string
+	ResponseHeaders   map[string]string
+	RequestBody       []byte
+	ResponseBody      []byte
+	ResponseBodyError string
+}
+
+func processFetchPaused(ctx context.Context, client *cdp.Client, opts networkCaptureOptions, event fetchRequestPausedEvent) {
+	defer continueFetchRequest(client, event.RequestID)
+
+	url := event.Request.URL
+	method := event.Request.Method
+	status := "<pending>"
+	if event.ResponseStatusCode != nil {
+		status = strconv.Itoa(*event.ResponseStatusCode)
+	}
+	responseHeaders := normalizeHeaderList(event.ResponseHeaders)
+	contentType := strings.ToLower(responseHeaders["content-type"])
+	if !opts.Filters.match(url, method, status, contentType) {
+		return
+	}
+
+	body, bodyErr := fetchResponseBody(ctx, client, event.RequestID)
+	requestHeaders := sanitizeHeaderMap(event.Request.Headers)
+	var requestBody []byte
+	if event.Request.PostData != "" {
+		requestBody = []byte(event.Request.PostData)
+	}
+
+	capture := networkCapture{
+		Timestamp:         time.Now(),
+		RequestID:         event.RequestID,
+		URL:               url,
+		Method:            method,
+		Stage:             event.RequestStage,
+		Status:            status,
+		ContentType:       contentType,
+		RequestHeaders:    requestHeaders,
+		ResponseHeaders:   responseHeaders,
+		RequestBody:       requestBody,
+		ResponseBody:      body,
+		ResponseBodyError: bodyErr,
+	}
+	if err := writeNetworkCapture(opts.Dir, capture); err != nil {
+		fmt.Fprintf(os.Stderr, "cdp network-log: failed to write capture for %s: %v\n", event.RequestID, err)
+	}
+}
+
+func fetchResponseBody(ctx context.Context, client *cdp.Client, requestID string) ([]byte, string) {
+	var result struct {
+		Body          string `json:"body"`
+		Base64Encoded bool   `json:"base64Encoded"`
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := client.Call(callCtx, "Fetch.getResponseBody", map[string]interface{}{
+		"requestId": requestID,
+	}, &result); err != nil {
+		return nil, err.Error()
+	}
+	if result.Body == "" {
+		return nil, ""
+	}
+	if result.Base64Encoded {
+		data, err := base64.StdEncoding.DecodeString(result.Body)
+		if err != nil {
+			return nil, fmt.Sprintf("decode body: %v", err)
+		}
+		return data, ""
+	}
+	return []byte(result.Body), ""
+}
+
+func continueFetchRequest(client *cdp.Client, requestID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client.Call(ctx, "Fetch.continueRequest", map[string]interface{}{
+		"requestId": requestID,
+	}, nil)
+}
+
+func normalizeHeaderList(headers []fetchHeaderEntry) map[string]string {
+	result := make(map[string]string, len(headers))
+	for _, header := range headers {
+		name := strings.ToLower(strings.TrimSpace(header.Name))
+		if name == "" {
+			continue
+		}
+		result[name] = header.Value
+	}
+	return result
+}
+
+func sanitizeHeaderMap(headers map[string]interface{}) map[string]string {
+	if len(headers) == 0 {
+		return map[string]string{}
+	}
+	result := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if key == "" || value == nil {
+			continue
+		}
+		result[key] = fmt.Sprint(value)
+	}
+	return result
+}
+
+func writeNetworkCapture(baseDir string, capture networkCapture) error {
+	requestFragment := sanitizePathFragment(capture.RequestID)
+	if requestFragment == "" {
+		requestFragment = "request"
+	}
+	dirName := fmt.Sprintf("%s-%s", capture.Timestamp.UTC().Format("20060102-150405.000000000"), requestFragment)
+	captureDir := filepath.Join(baseDir, dirName)
+	if err := os.MkdirAll(captureDir, 0o755); err != nil {
+		return err
+	}
+
+	metadata := map[string]interface{}{
+		"timestamp": capture.Timestamp.Format(time.RFC3339Nano),
+		"requestId": capture.RequestID,
+		"url":       capture.URL,
+		"method":    capture.Method,
+		"stage":     capture.Stage,
+		"status":    capture.Status,
+	}
+	if capture.ContentType != "" {
+		metadata["contentType"] = capture.ContentType
+	}
+	if capture.ResponseBodyError != "" {
+		metadata["responseBodyError"] = capture.ResponseBodyError
+	}
+	if err := writeJSONFile(filepath.Join(captureDir, "metadata.json"), metadata); err != nil {
+		return err
+	}
+
+	reqHeaders := capture.RequestHeaders
+	if reqHeaders == nil {
+		reqHeaders = map[string]string{}
+	}
+	if err := writeJSONFile(filepath.Join(captureDir, "request-headers.json"), reqHeaders); err != nil {
+		return err
+	}
+
+	respHeaders := capture.ResponseHeaders
+	if respHeaders == nil {
+		respHeaders = map[string]string{}
+	}
+	if err := writeJSONFile(filepath.Join(captureDir, "response-headers.json"), respHeaders); err != nil {
+		return err
+	}
+
+	if len(capture.RequestBody) > 0 {
+		if err := os.WriteFile(filepath.Join(captureDir, "request-body.bin"), capture.RequestBody, 0o644); err != nil {
+			return err
+		}
+	}
+	if len(capture.ResponseBody) > 0 {
+		if err := os.WriteFile(filepath.Join(captureDir, "response-body.bin"), capture.ResponseBody, 0o644); err != nil {
+			return err
+		}
+		if err := writeResponseBodyJSON(filepath.Join(captureDir, "response-body.json"), capture.ResponseBody); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeResponseBodyJSON(path string, body []byte) error {
+	var payload interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return nil
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeJSONFile(path string, payload interface{}) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func sanitizePathFragment(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
 
 func cmdTabs(args []string) error {
