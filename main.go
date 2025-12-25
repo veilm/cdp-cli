@@ -80,20 +80,26 @@ Usage:
 	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
 	  cdp targets
-  cdp close <name>`)
+  cdp close <name>
+
+Run 'cdp <command> --help' for command-specific usage.`)
 }
 
 func cmdConnect(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: cdp connect <name> --port --url")
-	}
-	name := args[0]
-
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(0), "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp connect <name> --port --url")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
 	fs.Parse(args[1:])
 	if *port == 0 {
 		return errors.New("--port is required")
@@ -156,17 +162,21 @@ func cmdConnect(args []string) error {
 }
 
 func cmdEval(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: cdp eval <name> \"expr\"")
-	}
-	name := args[0]
-
-	fs := flag.NewFlagSet("eval", flag.ExitOnError)
+	fs := newFlagSet("eval", "usage: cdp eval <name> \"expr\"")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
 	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
 	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
 	readStdin := fs.Bool("stdin", false, "Read JS from stdin")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp eval <name> \"expr\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
 	fs.Parse(args[1:])
 
 	filePath := *file
@@ -236,10 +246,18 @@ func cmdEval(args []string) error {
 }
 
 func cmdDOM(args []string) error {
-	fs := flag.NewFlagSet("dom", flag.ExitOnError)
+	fs := newFlagSet("dom", "usage: cdp dom <name> \".selector\"")
 	pretty := fs.Bool("pretty", true, "Pretty print output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) < 2 {
+	switch len(args) {
+	case 0:
+		fs.Usage()
+		return errors.New("usage: cdp dom <name> \".selector\"")
+	case 1:
+		if isHelpArg(args[0]) {
+			fs.Usage()
+			return nil
+		}
 		return errors.New("usage: cdp dom <name> \".selector\"")
 	}
 	name := args[0]
@@ -288,9 +306,17 @@ func cmdDOM(args []string) error {
 }
 
 func cmdStyles(args []string) error {
-	fs := flag.NewFlagSet("styles", flag.ExitOnError)
+	fs := newFlagSet("styles", "usage: cdp styles <name> \".selector\"")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) < 2 {
+	switch len(args) {
+	case 0:
+		fs.Usage()
+		return errors.New("usage: cdp styles <name> \".selector\"")
+	case 1:
+		if isHelpArg(args[0]) {
+			fs.Usage()
+			return nil
+		}
 		return errors.New("usage: cdp styles <name> \".selector\"")
 	}
 	name := args[0]
@@ -354,9 +380,17 @@ func cmdStyles(args []string) error {
 }
 
 func cmdRect(args []string) error {
-	fs := flag.NewFlagSet("rect", flag.ExitOnError)
+	fs := newFlagSet("rect", "usage: cdp rect <name> \".selector\"")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) < 2 {
+	switch len(args) {
+	case 0:
+		fs.Usage()
+		return errors.New("usage: cdp rect <name> \".selector\"")
+	case 1:
+		if isHelpArg(args[0]) {
+			fs.Usage()
+			return nil
+		}
 		return errors.New("usage: cdp rect <name> \".selector\"")
 	}
 	name := args[0]
@@ -408,12 +442,17 @@ func cmdRect(args []string) error {
 }
 
 func cmdScreenshot(args []string) error {
-	fs := flag.NewFlagSet("screenshot", flag.ExitOnError)
+	fs := newFlagSet("screenshot", "usage: cdp screenshot <name> [--selector ...]")
 	selector := fs.String("selector", "", "CSS selector to crop")
 	output := fs.String("output", "screenshot.png", "Output file path")
 	timeout := fs.Duration("timeout", 15*time.Second, "Command timeout")
-	if len(args) < 1 {
+	if len(args) == 0 {
+		fs.Usage()
 		return errors.New("usage: cdp screenshot <name> [--selector ...]")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
 	}
 	name := args[0]
 	fs.Parse(args[1:])
@@ -514,11 +553,16 @@ func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[
 }
 
 func cmdLog(args []string) error {
-	fs := flag.NewFlagSet("log", flag.ExitOnError)
+	fs := newFlagSet("log", "usage: cdp log <name> [\"setup script\"]")
 	limitFlag := fs.Int("limit", 100, "Maximum log entries to collect (<=0 for unlimited)")
 	timeoutFlag := fs.Duration("timeout", 15*time.Second, "Maximum time to wait for log events (0 disables)")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	fs.Parse(args)
 	if fs.NArg() < 1 {
+		fs.Usage()
 		return errors.New("usage: cdp log <name> [\"setup script\"]")
 	}
 	name := fs.Arg(0)
@@ -680,7 +724,12 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 
 func cmdTabs(args []string) error {
 	if len(args) == 0 {
+		printTabsUsage()
 		return errors.New("usage: cdp tabs <command> (list|switch|open)")
+	}
+	if isHelpArg(args[0]) {
+		printTabsUsage()
+		return nil
 	}
 	switch args[0] {
 	case "list":
@@ -694,8 +743,17 @@ func cmdTabs(args []string) error {
 	}
 }
 
+func printTabsUsage() {
+	fmt.Println("usage: cdp tabs <command> (list|switch|open)")
+	fmt.Println("Commands:")
+	fmt.Println("  list    List available tabs from a remote debugging port")
+	fmt.Println("  switch  Activate a tab by index, id, or pattern")
+	fmt.Println("  open    Open a new tab")
+	fmt.Println("Run 'cdp tabs <command> --help' for details.")
+}
+
 func cmdTabsList(args []string) error {
-	fs := flag.NewFlagSet("tabs list", flag.ExitOnError)
+	fs := newFlagSet("tabs list", "usage: cdp tabs list [--host --port] [--plain] [--pretty]")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")
@@ -739,7 +797,7 @@ func cmdTabsList(args []string) error {
 }
 
 func cmdTabsSwitch(args []string) error {
-	fs := flag.NewFlagSet("tabs switch", flag.ExitOnError)
+	fs := newFlagSet("tabs switch", "usage: cdp tabs switch <index|id|pattern>")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
@@ -777,7 +835,7 @@ func cmdTabsSwitch(args []string) error {
 }
 
 func cmdTabsOpen(args []string) error {
-	fs := flag.NewFlagSet("tabs open", flag.ExitOnError)
+	fs := newFlagSet("tabs open", "usage: cdp tabs open <url>")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
@@ -859,6 +917,10 @@ func matchTab(tabs []cdp.TargetInfo, ref string) (cdp.TargetInfo, error) {
 }
 
 func cmdTargets(args []string) error {
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fmt.Println("usage: cdp targets")
+		return nil
+	}
 	if len(args) != 0 {
 		return errors.New("usage: cdp targets")
 	}
@@ -895,7 +957,11 @@ func abbreviate(text string, limit int) string {
 }
 
 func cmdClose(args []string) error {
-	fs := flag.NewFlagSet("close", flag.ExitOnError)
+	fs := newFlagSet("close", "usage: cdp close <name>")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: cdp close <name>")
@@ -1052,4 +1118,29 @@ func readScriptFile(path string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+func newFlagSet(name, usage string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), usage)
+		if flagHasOptions(fs) {
+			fmt.Fprintln(fs.Output(), "\nOptions:")
+			fs.PrintDefaults()
+		}
+	}
+	return fs
+}
+
+func flagHasOptions(fs *flag.FlagSet) bool {
+	has := false
+	fs.VisitAll(func(*flag.Flag) {
+		has = true
+	})
+	return has
+}
+
+func isHelpArg(arg string) bool {
+	return arg == "-h" || arg == "--help"
 }
