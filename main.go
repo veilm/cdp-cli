@@ -737,16 +737,19 @@ func cmdNetworkLog(args []string) error {
 	methodPattern := fs.String("method", "", "Regex to match HTTP methods")
 	statusPattern := fs.String("status", "", "Regex to match HTTP status codes")
 	mimePattern := fs.String("mime", "", "Regex to match response Content-Type values")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp network-log <name> [options]")
+	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
 	}
-	fs.Parse(args)
-	if fs.NArg() != 1 {
-		fs.Usage()
-		return errors.New("usage: cdp network-log <name> [options]")
+	name := args[0]
+	fs.Parse(args[1:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	name := fs.Arg(0)
 
 	filters, err := buildNetworkFilters(*urlPattern, *methodPattern, *statusPattern, *mimePattern)
 	if err != nil {
@@ -1053,11 +1056,7 @@ func sanitizeHeaderMap(headers map[string]interface{}) map[string]string {
 }
 
 func writeNetworkCapture(baseDir string, capture networkCapture) error {
-	requestFragment := sanitizePathFragment(capture.RequestID)
-	if requestFragment == "" {
-		requestFragment = "request"
-	}
-	dirName := fmt.Sprintf("%s-%s", capture.Timestamp.UTC().Format("20060102-150405.000000000"), requestFragment)
+	dirName := formatCaptureDirName(capture)
 	captureDir := filepath.Join(baseDir, dirName)
 	if err := os.MkdirAll(captureDir, 0o755); err != nil {
 		return err
@@ -1144,6 +1143,70 @@ func sanitizePathFragment(value string) string {
 		}
 	}
 	return strings.Trim(b.String(), "_")
+}
+
+func formatCaptureDirName(capture networkCapture) string {
+	ms := capture.Timestamp.UnixNano() / int64(time.Millisecond)
+	method := strings.ToUpper(strings.TrimSpace(capture.Method))
+	if method == "" {
+		method = "REQ"
+	}
+	urlFragment := shortenURLFragment(capture.URL, 96)
+	return fmt.Sprintf("%d-%s-%s", ms, method, urlFragment)
+}
+
+func shortenURLFragment(raw string, limit int) string {
+	fragment := normalizeURLFragment(raw)
+	if limit <= 0 || len(fragment) <= limit {
+		return fragment
+	}
+	if limit <= 6 {
+		return fragment[:limit]
+	}
+	head := (limit - 3) / 2
+	tail := limit - 3 - head
+	return fragment[:head] + "..." + fragment[len(fragment)-tail:]
+}
+
+func normalizeURLFragment(raw string) string {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return "url"
+	}
+	if u, err := url.Parse(clean); err == nil && u.Host != "" {
+		clean = u.Host + u.Path
+	} else {
+		if i := strings.Index(clean, "://"); i != -1 {
+			clean = clean[i+3:]
+		}
+		if i := strings.IndexAny(clean, "?#"); i != -1 {
+			clean = clean[:i]
+		}
+	}
+	clean = strings.SplitN(clean, "?", 2)[0]
+	clean = strings.SplitN(clean, "#", 2)[0]
+	clean = strings.Trim(clean, "/")
+	clean = strings.ReplaceAll(clean, "/", "-")
+	clean = strings.ToLower(clean)
+
+	var b strings.Builder
+	for _, r := range clean {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	fragment := strings.Trim(b.String(), "-_.")
+	if fragment == "" {
+		return "url"
+	}
+	return fragment
 }
 
 func cmdTabs(args []string) error {
