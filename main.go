@@ -60,8 +60,8 @@ func run() error {
 		return cmdLog(args)
 	case "network-log":
 		return cmdNetworkLog(args)
-	case "bring-to-front":
-		return cmdBringToFront(args)
+	case "keep-alive":
+		return cmdKeepAlive(args)
 	case "tabs":
 		return cmdTabs(args)
 	case "targets":
@@ -85,7 +85,7 @@ Usage:
 	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
 	  cdp log <name> ["script to eval before streaming"]
 	  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]
-	  cdp bring-to-front <name>
+	  cdp keep-alive <name>
 	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
 	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
 	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
@@ -679,12 +679,12 @@ loop:
 	return nil
 }
 
-func cmdBringToFront(args []string) error {
-	fs := newFlagSet("bring-to-front", "usage: cdp bring-to-front <name>")
+func cmdKeepAlive(args []string) error {
+	fs := newFlagSet("keep-alive", "usage: cdp keep-alive <name>")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp bring-to-front <name>")
+		return errors.New("usage: cdp keep-alive <name>")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -710,10 +710,20 @@ func cmdBringToFront(args []string) error {
 	}
 	defer handle.Close()
 
-	if err := handle.client.Call(ctx, "Page.bringToFront", nil, nil); err != nil {
-		return err
+	commands := []struct {
+		method string
+		params map[string]interface{}
+	}{
+		{"Emulation.setFocusEmulationEnabled", map[string]interface{}{"enabled": true}},
+		{"Page.setWebLifecycleState", map[string]interface{}{"state": "active"}},
+		{"Page.bringToFront", nil},
 	}
-	fmt.Printf("Tab %s brought to front (%s)\n", name, abbreviate(handle.session.Title, 60))
+	for _, cmd := range commands {
+		if err := handle.client.Call(ctx, cmd.method, cmd.params, nil); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("Keep-alive applied to %s (%s)\n", name, abbreviate(handle.session.Title, 60))
 	return nil
 }
 
