@@ -15,6 +15,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp rect manager ".selector"` prints a DOMRect snapshot.
 - `cdp tabs list --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
 - `cdp connect manager --tab 3 --port 9222` binds a session by tab index or pattern.
+- `cdp connect manager --new --port 9222` opens a new tab and connects it immediately.
 - `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
 - `cdp wait manager --selector ".compose"` and `cdp wait-visible manager ".compose"` pause until the page is ready.

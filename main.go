@@ -82,39 +82,47 @@ func run() error {
 }
 
 func printUsage() {
-	fmt.Println(`cdp - Chrome DevTools CLI helper
+	fmt.Println("cdp - Chrome DevTools CLI helper")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  cdp connect <name> --port 9222 --url https://example")
+	fmt.Println("  \t  cdp connect <name> --port 9222 --tab 3")
+	fmt.Println("  \t  cdp connect <name> --port 9222 --new [--new-url https://example]")
+	fmt.Println("  \t  cdp eval <name> \"JS expression\" [--pretty] [--depth N] [--json] [--wait]")
+	fmt.Println("  \t  cdp wait <name> [--selector \".selector\"] [--visible]")
+	fmt.Println("  \t  cdp wait-visible <name> \".selector\"")
+	fmt.Println("  \t  cdp click <name> \".selector\"")
+	fmt.Println("  \t  cdp type <name> \".selector\" \"text\"")
+	fmt.Println("  \t  cdp dom <name> \"CSS selector\"")
+	fmt.Println("  \t  cdp styles <name> \"CSS selector\"")
+	fmt.Println("  \t  cdp rect <name> \"CSS selector\"")
+	fmt.Println("  \t  cdp screenshot <name> [--selector \".composer\"] [--output file.png]")
+	fmt.Println("  \t  cdp log <name> [\"script to eval before streaming\"]")
+	fmt.Println("  \t  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]")
+	fmt.Println("  \t  cdp keep-alive <name>")
+	fmt.Println("  \t  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]")
+	fmt.Println("  \t  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]")
+	fmt.Println("  \t  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]")
+	fmt.Println("  \t  cdp tabs close <index|id|pattern> [--host 127.0.0.1 --port 9222]")
+	fmt.Println("  \t  cdp targets")
+	fmt.Println("  cdp disconnect <name>")
+	fmt.Println()
+	if port, ok := envDefaultPort(); ok {
+		fmt.Printf("Configured default port (CDP_PORT): %d\n\n", port)
+	}
+	fmt.Println("Run 'cdp <command> --help' for command-specific usage.")
 
-Usage:
-  cdp connect <name> --port 9222 --url https://example
-	  cdp connect <name> --port 9222 --tab 3
-	  cdp eval <name> "JS expression" [--pretty] [--depth N] [--json] [--wait]
-	  cdp wait <name> [--selector ".selector"] [--visible]
-	  cdp wait-visible <name> ".selector"
-	  cdp click <name> ".selector"
-	  cdp type <name> ".selector" "text"
-	  cdp dom <name> "CSS selector"
-	  cdp styles <name> "CSS selector"
-	  cdp rect <name> "CSS selector"
-	  cdp screenshot <name> [--selector ".composer"] [--output file.png]
-	  cdp log <name> ["script to eval before streaming"]
-	  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]
-	  cdp keep-alive <name>
-	  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]
-	  cdp tabs open <url> [--host 127.0.0.1 --port 9222] [--activate=false]
-	  cdp tabs switch <index|id|pattern> [--host 127.0.0.1 --port 9222]
-	  cdp tabs close <index|id|pattern> [--host 127.0.0.1 --port 9222]
-	  cdp targets
-  cdp disconnect <name>
-
-Run 'cdp <command> --help' for command-specific usage.`)
 }
 
 func cmdConnect(args []string) error {
-	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url\nor:    cdp connect <name> --port --tab <index|id|pattern>")
+	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url\nor:    cdp connect <name> --port --tab <index|id|pattern>\nor:    cdp connect <name> --port --new [--new-url <url>]")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(0), "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
 	targetRef := fs.String("tab", "", "Tab index, id, or pattern from tabs list")
+	newTab := fs.Bool("new", false, "Open a new tab and connect to it")
+	newURL := fs.String("new-url", "about:blank", "URL to open when using --new")
+	activate := fs.Bool("activate", true, "Activate the tab after opening (with --new)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
 	if len(args) == 0 {
 		fs.Usage()
@@ -129,11 +137,14 @@ func cmdConnect(args []string) error {
 	if *port == 0 {
 		return errors.New("--port is required")
 	}
+	if *newTab && (*targetURL != "" || *targetRef != "") {
+		return errors.New("use --new without --url or --tab")
+	}
 	if *targetURL != "" && *targetRef != "" {
 		return errors.New("use either --url or --tab, not both")
 	}
-	if *targetURL == "" && *targetRef == "" {
-		return errors.New("one of --url or --tab is required")
+	if !*newTab && *targetURL == "" && *targetRef == "" {
+		return errors.New("one of --url, --tab, or --new is required")
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
@@ -148,7 +159,22 @@ func cmdConnect(args []string) error {
 	defer cancel()
 
 	var target cdp.TargetInfo
-	if *targetRef != "" {
+	switch {
+	case *newTab:
+		tab, err := cdp.CreateTarget(ctx, *host, *port, *newURL)
+		if err != nil {
+			return err
+		}
+		if tab.URL == "" {
+			tab.URL = *newURL
+		}
+		if *activate {
+			if err := cdp.ActivateTarget(ctx, *host, *port, tab.ID); err != nil {
+				return err
+			}
+		}
+		target = tab
+	case *targetRef != "":
 		tabs, err := fetchTabs(ctx, *host, *port)
 		if err != nil {
 			return fmt.Errorf("list tabs failed (check with 'cdp tabs list --host %s --port %d'): %w", *host, *port, err)
@@ -161,7 +187,7 @@ func cmdConnect(args []string) error {
 			return err
 		}
 		target = tab
-	} else {
+	default:
 		targets, err := cdp.ListTargets(ctx, *host, *port)
 		if err != nil {
 			return fmt.Errorf("list targets failed (check with 'cdp tabs list --host %s --port %d'): %w", *host, *port, err)
