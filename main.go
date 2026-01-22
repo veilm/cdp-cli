@@ -48,6 +48,14 @@ func run() error {
 		return cmdConnect(args)
 	case "eval":
 		return cmdEval(args)
+	case "wait":
+		return cmdWait(args)
+	case "wait-visible":
+		return cmdWaitVisible(args)
+	case "click":
+		return cmdClick(args)
+	case "type":
+		return cmdType(args)
 	case "dom":
 		return cmdDOM(args)
 	case "styles":
@@ -78,7 +86,12 @@ func printUsage() {
 
 Usage:
   cdp connect <name> --port 9222 --url https://example
-	  cdp eval <name> "JS expression" [--pretty] [--depth N]
+	  cdp connect <name> --port 9222 --tab 3
+	  cdp eval <name> "JS expression" [--pretty] [--depth N] [--json] [--wait]
+	  cdp wait <name> [--selector ".selector"] [--visible]
+	  cdp wait-visible <name> ".selector"
+	  cdp click <name> ".selector"
+	  cdp type <name> ".selector" "text"
 	  cdp dom <name> "CSS selector"
 	  cdp styles <name> "CSS selector"
 	  cdp rect <name> "CSS selector"
@@ -97,14 +110,15 @@ Run 'cdp <command> --help' for command-specific usage.`)
 }
 
 func cmdConnect(args []string) error {
-	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url")
+	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url\nor:    cdp connect <name> --port --tab <index|id|pattern>")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(0), "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
+	targetRef := fs.String("tab", "", "Tab index, id, or pattern from tabs list")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp connect <name> --port --url")
+		return errors.New("usage: cdp connect <name> --port --url (or --tab)")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -115,8 +129,11 @@ func cmdConnect(args []string) error {
 	if *port == 0 {
 		return errors.New("--port is required")
 	}
-	if *targetURL == "" {
-		return errors.New("--url is required")
+	if *targetURL != "" && *targetRef != "" {
+		return errors.New("use either --url or --tab, not both")
+	}
+	if *targetURL == "" && *targetRef == "" {
+		return errors.New("one of --url or --tab is required")
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
@@ -130,13 +147,30 @@ func cmdConnect(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	targets, err := cdp.ListTargets(ctx, *host, *port)
-	if err != nil {
-		return err
-	}
-	target, ok := cdp.FindTarget(targets, *targetURL)
-	if !ok {
-		return fmt.Errorf("no target matching %s", *targetURL)
+	var target cdp.TargetInfo
+	if *targetRef != "" {
+		tabs, err := fetchTabs(ctx, *host, *port)
+		if err != nil {
+			return fmt.Errorf("list tabs failed (check with 'cdp tabs list --host %s --port %d'): %w", *host, *port, err)
+		}
+		if len(tabs) == 0 {
+			return fmt.Errorf("no tabs available (run 'cdp tabs list --host %s --port %d' to confirm)", *host, *port)
+		}
+		tab, err := matchTab(tabs, *targetRef)
+		if err != nil {
+			return err
+		}
+		target = tab
+	} else {
+		targets, err := cdp.ListTargets(ctx, *host, *port)
+		if err != nil {
+			return fmt.Errorf("list targets failed (check with 'cdp tabs list --host %s --port %d'): %w", *host, *port, err)
+		}
+		found, ok := cdp.FindTarget(targets, *targetURL)
+		if !ok {
+			return fmt.Errorf("no target matching %s (run 'cdp tabs list --host %s --port %d' to confirm)", *targetURL, *host, *port)
+		}
+		target = found
 	}
 	if target.WebSocket == "" {
 		return errors.New("target does not expose webSocketDebuggerUrl")
@@ -176,6 +210,8 @@ func cmdEval(args []string) error {
 	fs := newFlagSet("eval", "usage: cdp eval <name> \"expr\"")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
+	jsonOutput := fs.Bool("json", false, "Serialize objects via JSON.stringify when possible")
+	waitReady := fs.Bool("wait", false, "Wait for document.readyState == 'complete' before evaluating")
 	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
 	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
 	readStdin := fs.Bool("stdin", false, "Read JS from stdin")
@@ -244,15 +280,265 @@ func cmdEval(args []string) error {
 	}
 	defer handle.Close()
 
-	value, err := handle.client.Evaluate(ctx, expression)
+	if *waitReady {
+		if err := waitForReadyState(ctx, handle.client, 200*time.Millisecond); err != nil {
+			return err
+		}
+	}
+
+	res, err := handle.client.EvaluateRaw(ctx, expression, !*jsonOutput)
 	if err != nil {
 		return err
+	}
+	value, err := handle.client.RemoteObjectValue(ctx, res.Result)
+	if err != nil {
+		return err
+	}
+	if !*jsonOutput && res.Result.Type == "object" && res.Result.Subtype == "node" {
+		fmt.Fprintln(os.Stderr, "warning: eval returned a DOM node; try --json or return a serializable value")
 	}
 	output, err := format.JSON(value, *pretty, *depth)
 	if err != nil {
 		return err
 	}
 	fmt.Println(output)
+	return nil
+}
+
+func cmdWait(args []string) error {
+	fs := newFlagSet("wait", "usage: cdp wait <name> [--selector \".selector\"] [--visible]")
+	selector := fs.String("selector", "", "CSS selector to wait for")
+	visible := fs.Bool("visible", false, "Wait for selector to be visible (requires --selector)")
+	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval")
+	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp wait <name> [--selector \".selector\"] [--visible]")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
+	fs.Parse(args[1:])
+	if *visible && *selector == "" {
+		return errors.New("--visible requires --selector")
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	switch {
+	case *selector == "":
+		if err := waitForReadyState(ctx, handle.client, *poll); err != nil {
+			return err
+		}
+		fmt.Println("Ready")
+	case *visible:
+		if err := waitForSelectorVisible(ctx, handle.client, *selector, *poll); err != nil {
+			return err
+		}
+		fmt.Printf("Visible: %s\n", *selector)
+	default:
+		if err := waitForSelector(ctx, handle.client, *selector, *poll); err != nil {
+			return err
+		}
+		fmt.Printf("Found: %s\n", *selector)
+	}
+	return nil
+}
+
+func cmdWaitVisible(args []string) error {
+	fs := newFlagSet("wait-visible", "usage: cdp wait-visible <name> \".selector\"")
+	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval")
+	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp wait-visible <name> \".selector\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
+	if len(args) < 2 {
+		return errors.New("usage: cdp wait-visible <name> \".selector\"")
+	}
+	selector := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	if err := waitForSelectorVisible(ctx, handle.client, selector, *poll); err != nil {
+		return err
+	}
+	fmt.Printf("Visible: %s\n", selector)
+	return nil
+}
+
+func cmdClick(args []string) error {
+	fs := newFlagSet("click", "usage: cdp click <name> \".selector\"")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp click <name> \".selector\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
+	if len(args) < 2 {
+		return errors.New("usage: cdp click <name> \".selector\"")
+	}
+	selector := args[1]
+	fs.Parse(args[2:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) {
+            throw new Error("selector not found: " + %s);
+        }
+        if (el.scrollIntoView) {
+            el.scrollIntoView({block: "center", inline: "center"});
+        }
+        if (el.focus) {
+            el.focus();
+        }
+        el.click();
+        return true;
+    })()`, strconv.Quote(selector), strconv.Quote(selector))
+
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+	fmt.Printf("Clicked: %s\n", selector)
+	return nil
+}
+
+func cmdType(args []string) error {
+	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\"")
+	appendText := fs.Bool("append", false, "Append text instead of replacing")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp type <name> \".selector\" \"text\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	name := args[0]
+	if len(args) < 3 {
+		return errors.New("usage: cdp type <name> \".selector\" \"text\"")
+	}
+	selector := args[1]
+	text := args[2]
+	fs.Parse(args[3:])
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) {
+            throw new Error("selector not found: " + %s);
+        }
+        const text = %s;
+        const append = %t;
+        if (el.scrollIntoView) {
+            el.scrollIntoView({block: "center", inline: "center"});
+        }
+        if (el.focus) {
+            el.focus();
+        }
+        const tag = el.tagName ? el.tagName.toLowerCase() : "";
+        const isTextInput = tag === "input" || tag === "textarea";
+        if (isTextInput) {
+            if (!append) {
+                el.value = "";
+            }
+            el.value = append ? el.value + text : text;
+            el.dispatchEvent(new Event("input", {bubbles: true}));
+            el.dispatchEvent(new Event("change", {bubbles: true}));
+            return true;
+        }
+        if (el.isContentEditable) {
+            if (!append) {
+                el.textContent = "";
+            }
+            el.textContent = append ? el.textContent + text : text;
+            el.dispatchEvent(new Event("input", {bubbles: true}));
+            return true;
+        }
+        if (!append) {
+            el.textContent = "";
+        }
+        el.textContent = append ? el.textContent + text : text;
+        return true;
+    })()`, strconv.Quote(selector), strconv.Quote(selector), strconv.Quote(text), *appendText)
+
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+	fmt.Printf("Typed into: %s\n", selector)
 	return nil
 }
 
@@ -1555,6 +1841,65 @@ func cmdTargets(args []string) error {
 		fmt.Printf("%-12s %-6d %-30s %s\n", name, session.Port, abbreviate(session.Title, 30), session.URL)
 	}
 	return nil
+}
+
+func waitForReadyState(ctx context.Context, client *cdp.Client, poll time.Duration) error {
+	return waitForCondition(ctx, client, `document.readyState === "complete"`, "document.readyState == 'complete'", poll)
+}
+
+func waitForSelector(ctx context.Context, client *cdp.Client, selector string, poll time.Duration) error {
+	expression := fmt.Sprintf(`(() => {
+        return document.querySelector(%s) !== null;
+    })()`, strconv.Quote(selector))
+	return waitForCondition(ctx, client, expression, fmt.Sprintf("selector %s", selector), poll)
+}
+
+func waitForSelectorVisible(ctx context.Context, client *cdp.Client, selector string, poll time.Duration) error {
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) { return false; }
+        const style = window.getComputedStyle(el);
+        if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) {
+            return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    })()`, strconv.Quote(selector))
+	return waitForCondition(ctx, client, expression, fmt.Sprintf("visible selector %s", selector), poll)
+}
+
+func waitForCondition(ctx context.Context, client *cdp.Client, expression, description string, poll time.Duration) error {
+	if poll <= 0 {
+		poll = 200 * time.Millisecond
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		ok, err := evalBool(ctx, client, expression)
+		if err == nil && ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for %s", description)
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func evalBool(ctx context.Context, client *cdp.Client, expression string) (bool, error) {
+	value, err := client.Evaluate(ctx, expression)
+	if err != nil {
+		return false, err
+	}
+	result, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("unexpected wait result type %T", value)
+	}
+	return result, nil
 }
 
 func abbreviate(text string, limit int) string {

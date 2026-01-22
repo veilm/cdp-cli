@@ -241,19 +241,19 @@ type ExceptionDetails struct {
 	Exception *RemoteObject `json:"exception"`
 }
 
-// Evaluate evaluates JS inside the target and resolves the resulting object into Go values.
-func (c *Client) Evaluate(ctx context.Context, expression string) (interface{}, error) {
+// EvaluateRaw evaluates JS inside the target and returns the raw CDP response.
+func (c *Client) EvaluateRaw(ctx context.Context, expression string, returnByValue bool) (RuntimeEvaluateResult, error) {
 	var res RuntimeEvaluateResult
 	err := c.Call(ctx, "Runtime.evaluate", map[string]interface{}{
 		"expression":                  expression,
-		"returnByValue":               true,
+		"returnByValue":               returnByValue,
 		"awaitPromise":                true,
 		"userGesture":                 true,
 		"replMode":                    true,
 		"allowUnsafeEvalBlockedByCSP": true,
 	}, &res)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	if res.ExceptionDetails != nil {
 		msg := strings.TrimSpace(res.ExceptionDetails.Text)
@@ -276,7 +276,16 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (interface{}, 
 		} else if detail != "" && detail != msg {
 			msg = fmt.Sprintf("%s (%s)", msg, detail)
 		}
-		return nil, errors.New(msg)
+		return res, errors.New(msg)
+	}
+	return res, nil
+}
+
+// Evaluate evaluates JS inside the target and resolves the resulting object into Go values.
+func (c *Client) Evaluate(ctx context.Context, expression string) (interface{}, error) {
+	res, err := c.EvaluateRaw(ctx, expression, true)
+	if err != nil {
+		return nil, err
 	}
 	return c.RemoteObjectValue(ctx, res.Result)
 }
