@@ -236,7 +236,7 @@ func cmdEval(args []string) error {
 	fs := newFlagSet("eval", "usage: cdp eval <name> \"expr\"")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
-	jsonOutput := fs.Bool("json", false, "Serialize objects via JSON.stringify when possible")
+	jsonOutput := fs.Bool("json", true, "Serialize objects via JSON.stringify when possible")
 	waitReady := fs.Bool("wait", false, "Wait for document.readyState == 'complete' before evaluating")
 	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
 	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
@@ -312,16 +312,23 @@ func cmdEval(args []string) error {
 		}
 	}
 
-	res, err := handle.client.EvaluateRaw(ctx, expression, !*jsonOutput)
+	returnByValue := false
+	res, err := handle.client.EvaluateRaw(ctx, expression, returnByValue)
 	if err != nil {
 		return err
+	}
+	if returnByValue && res.Result.Subtype == "promise" {
+		res, err = handle.client.EvaluateRaw(ctx, expression, false)
+		if err != nil {
+			return err
+		}
 	}
 	value, err := handle.client.RemoteObjectValue(ctx, res.Result)
 	if err != nil {
 		return err
 	}
 	if !*jsonOutput && res.Result.Type == "object" && res.Result.Subtype == "node" {
-		fmt.Fprintln(os.Stderr, "warning: eval returned a DOM node; try --json or return a serializable value")
+		fmt.Fprintln(os.Stderr, "warning: eval returned a DOM node; use --json if you want serialized output")
 	}
 	output, err := format.JSON(value, *pretty, *depth)
 	if err != nil {
@@ -527,7 +534,6 @@ func cmdType(args []string) error {
         if (!el) {
             throw new Error("selector not found: " + %s);
         }
-        const text = %s;
         const append = %t;
         if (el.scrollIntoView) {
             el.scrollIntoView({block: "center", inline: "center"});
@@ -541,27 +547,57 @@ func cmdType(args []string) error {
             if (!append) {
                 el.value = "";
             }
-            el.value = append ? el.value + text : text;
-            el.dispatchEvent(new Event("input", {bubbles: true}));
-            el.dispatchEvent(new Event("change", {bubbles: true}));
-            return true;
+            if (el.setSelectionRange) {
+                const end = el.value.length;
+                el.setSelectionRange(end, end);
+            }
+            return { found: true, editable: true, contentEditable: false };
         }
         if (el.isContentEditable) {
             if (!append) {
                 el.textContent = "";
             }
-            el.textContent = append ? el.textContent + text : text;
-            el.dispatchEvent(new Event("input", {bubbles: true}));
-            return true;
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            return { found: true, editable: true, contentEditable: true };
         }
+        return { found: true, editable: false, contentEditable: false };
+    })()`, strconv.Quote(selector), strconv.Quote(selector), *appendText)
+
+	value, err := handle.client.Evaluate(ctx, expression)
+	if err != nil {
+		return err
+	}
+	state, ok := value.(map[string]interface{})
+	if !ok || state["found"] != true {
+		return errors.New("selector not found")
+	}
+	editable, _ := state["editable"].(bool)
+	if editable {
+		if err := handle.client.Call(ctx, "Input.insertText", map[string]interface{}{
+			"text": text,
+		}, nil); err != nil {
+			return err
+		}
+		fmt.Printf("Typed into: %s\n", selector)
+		return nil
+	}
+
+	fallback := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) { return false; }
+        const append = %t;
         if (!append) {
             el.textContent = "";
         }
-        el.textContent = append ? el.textContent + text : text;
+        el.textContent = append ? el.textContent + %s : %s;
         return true;
-    })()`, strconv.Quote(selector), strconv.Quote(selector), strconv.Quote(text), *appendText)
-
-	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+    })()`, strconv.Quote(selector), *appendText, strconv.Quote(text), strconv.Quote(text))
+	if _, err := handle.client.Evaluate(ctx, fallback); err != nil {
 		return err
 	}
 	fmt.Printf("Typed into: %s\n", selector)
@@ -1693,11 +1729,15 @@ func cmdTabsOpen(args []string) error {
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	activate := fs.Bool("activate", true, "Activate the tab after opening")
-	fs.Parse(args)
-	if fs.NArg() != 1 {
+	pageURL, flagArgs, err := splitTabsOpenArgs(args)
+	if err != nil {
+		return err
+	}
+	fs.Parse(flagArgs)
+	if fs.NArg() != 0 {
 		return errors.New("usage: cdp tabs open <url>")
 	}
-	pageURL := strings.TrimSpace(fs.Arg(0))
+	pageURL = strings.TrimSpace(pageURL)
 	if pageURL == "" {
 		return errors.New("url cannot be empty")
 	}
@@ -1867,6 +1907,60 @@ func cmdTargets(args []string) error {
 		fmt.Printf("%-12s %-6d %-30s %s\n", name, session.Port, abbreviate(session.Title, 30), session.URL)
 	}
 	return nil
+}
+
+func splitTabsOpenArgs(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		return "", nil, errors.New("usage: cdp tabs open <url>")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		return "", nil, errors.New("usage: cdp tabs open <url>")
+	}
+	var url string
+	flags := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			name, hasValue := splitFlagName(arg)
+			if hasValue {
+				continue
+			}
+			switch name {
+			case "host", "port", "timeout":
+				if i+1 >= len(args) {
+					return "", nil, fmt.Errorf("flag %s requires a value", arg)
+				}
+				flags = append(flags, args[i+1])
+				i++
+			case "activate":
+				if i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
+					flags = append(flags, args[i+1])
+					i++
+				}
+			}
+			continue
+		}
+		if url != "" {
+			return "", nil, fmt.Errorf("unexpected argument: %s", arg)
+		}
+		url = arg
+	}
+	if url == "" {
+		return "", nil, errors.New("usage: cdp tabs open <url>")
+	}
+	return url, flags, nil
+}
+
+func splitFlagName(arg string) (string, bool) {
+	name := strings.TrimLeft(arg, "-")
+	if name == "" {
+		return "", false
+	}
+	if idx := strings.Index(name, "="); idx != -1 {
+		return name[:idx], true
+	}
+	return name, false
 }
 
 func waitForReadyState(ctx context.Context, client *cdp.Client, poll time.Duration) error {

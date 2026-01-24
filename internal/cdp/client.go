@@ -256,27 +256,39 @@ func (c *Client) EvaluateRaw(ctx context.Context, expression string, returnByVal
 		return res, err
 	}
 	if res.ExceptionDetails != nil {
-		msg := strings.TrimSpace(res.ExceptionDetails.Text)
-		var detail string
-		if res.ExceptionDetails.Exception != nil {
-			if d, err := c.RemoteObjectValue(ctx, *res.ExceptionDetails.Exception); err == nil && d != nil {
-				if m, ok := d.(map[string]interface{}); !ok || len(m) > 0 {
-					detail = strings.TrimSpace(fmt.Sprint(d))
-				}
-			}
-			if detail == "" {
-				detail = strings.TrimSpace(res.ExceptionDetails.Exception.Description)
-			}
+		return res, exceptionError(ctx, c, res.ExceptionDetails)
+	}
+	if returnByValue && res.Result.Subtype == "promise" && res.Result.ObjectID == "" {
+		var alt RuntimeEvaluateResult
+		err := c.Call(ctx, "Runtime.evaluate", map[string]interface{}{
+			"expression":                  expression,
+			"returnByValue":               false,
+			"awaitPromise":                true,
+			"userGesture":                 true,
+			"replMode":                    true,
+			"allowUnsafeEvalBlockedByCSP": true,
+		}, &alt)
+		if err != nil {
+			return res, err
 		}
-		if msg == "" && detail != "" {
-			msg = detail
+		if alt.ExceptionDetails != nil {
+			return alt, exceptionError(ctx, c, alt.ExceptionDetails)
 		}
-		if msg == "" {
-			msg = "runtime exception"
-		} else if detail != "" && detail != msg {
-			msg = fmt.Sprintf("%s (%s)", msg, detail)
+		res = alt
+	}
+	if res.Result.Subtype == "promise" && res.Result.ObjectID != "" {
+		var awaited RuntimeEvaluateResult
+		err := c.Call(ctx, "Runtime.awaitPromise", map[string]interface{}{
+			"promiseObjectId": res.Result.ObjectID,
+			"returnByValue":   returnByValue,
+		}, &awaited)
+		if err != nil {
+			return res, err
 		}
-		return res, errors.New(msg)
+		if awaited.ExceptionDetails != nil {
+			return awaited, exceptionError(ctx, c, awaited.ExceptionDetails)
+		}
+		res.Result = awaited.Result
 	}
 	return res, nil
 }
@@ -288,6 +300,33 @@ func (c *Client) Evaluate(ctx context.Context, expression string) (interface{}, 
 		return nil, err
 	}
 	return c.RemoteObjectValue(ctx, res.Result)
+}
+
+func exceptionError(ctx context.Context, c *Client, details *ExceptionDetails) error {
+	if details == nil {
+		return errors.New("runtime exception")
+	}
+	msg := strings.TrimSpace(details.Text)
+	var detail string
+	if details.Exception != nil {
+		if d, err := c.RemoteObjectValue(ctx, *details.Exception); err == nil && d != nil {
+			if m, ok := d.(map[string]interface{}); !ok || len(m) > 0 {
+				detail = strings.TrimSpace(fmt.Sprint(d))
+			}
+		}
+		if detail == "" {
+			detail = strings.TrimSpace(details.Exception.Description)
+		}
+	}
+	if msg == "" && detail != "" {
+		msg = detail
+	}
+	if msg == "" {
+		msg = "runtime exception"
+	} else if detail != "" && detail != msg {
+		msg = fmt.Sprintf("%s (%s)", msg, detail)
+	}
+	return errors.New(msg)
 }
 
 // RemoteObjectValue resolves a RemoteObject into a native Go value.
@@ -325,14 +364,16 @@ func (c *Client) RemoteObjectValue(ctx context.Context, obj RemoteObject) (inter
                     }
                 } catch (e) {}
                 try {
+                    if (this && typeof this === 'object' && typeof this.outerHTML === 'string') {
+                        return this.outerHTML;
+                    }
+                } catch (e) {}
+                try {
                     const json = JSON.stringify(this);
                     if (json !== undefined) {
                         return JSON.parse(json);
                     }
                 } catch (e) {}
-                if (this && typeof this === 'object' && typeof this.outerHTML === 'string') {
-                    return this.outerHTML;
-                }
                 try { return String(this); } catch (e) {}
                 return null;
             }`,
