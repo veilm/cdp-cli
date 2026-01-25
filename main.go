@@ -132,8 +132,17 @@ func cmdConnect(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
+		return errors.New("usage: cdp connect <name> --port --url (or --tab)")
+	}
+	name := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
+	}
 	if *port == 0 {
 		return errors.New("--port is required")
 	}
@@ -146,10 +155,6 @@ func cmdConnect(args []string) error {
 	if !*newTab && *targetURL == "" && *targetRef == "" {
 		return errors.New("one of --url, --tab, or --new is required")
 	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -249,8 +254,14 @@ func cmdEval(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
+		return errors.New("usage: cdp eval <name> \"expr\"")
+	}
+	name := pos[0]
 
 	filePath := *file
 	useStdin := *readStdin
@@ -280,12 +291,12 @@ func cmdEval(args []string) error {
 		}
 		expression = string(src)
 	default:
-		if fs.NArg() == 0 {
+		if len(pos) < 2 {
 			return errors.New("missing JS expression (pass literal, --file, or --stdin)")
 		}
-		expression = fs.Arg(0)
-		if fs.NArg() > 1 {
-			return fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+		expression = pos[1]
+		if len(pos) > 2 {
+			return fmt.Errorf("unexpected argument: %s", pos[2])
 		}
 	}
 	if strings.TrimSpace(expression) == "" {
@@ -352,13 +363,19 @@ func cmdWait(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
+		return errors.New("usage: cdp wait <name> [--selector \".selector\"] [--visible]")
+	}
+	name := pos[0]
 	if *visible && *selector == "" {
 		return errors.New("--visible requires --selector")
 	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 
 	st, err := store.Load()
@@ -407,14 +424,17 @@ func cmdWaitVisible(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	if len(args) < 2 {
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
 		return errors.New("usage: cdp wait-visible <name> \".selector\"")
 	}
-	selector := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -448,14 +468,17 @@ func cmdClick(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	if len(args) < 2 {
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
 		return errors.New("usage: cdp click <name> \".selector\"")
 	}
-	selector := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -505,15 +528,18 @@ func cmdType(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	if len(args) < 3 {
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 3 {
 		return errors.New("usage: cdp type <name> \".selector\" \"text\"")
 	}
-	selector := args[1]
-	text := args[2]
-	fs.Parse(args[3:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	name := pos[0]
+	selector := pos[1]
+	text := pos[2]
+	if len(pos) > 3 {
+		return fmt.Errorf("unexpected argument: %s", pos[3])
 	}
 
 	st, err := store.Load()
@@ -619,11 +645,17 @@ func cmdDOM(args []string) error {
 		}
 		return errors.New("usage: cdp dom <name> \".selector\"")
 	}
-	name := args[0]
-	selector := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: cdp dom <name> \".selector\"")
+	}
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -678,11 +710,17 @@ func cmdStyles(args []string) error {
 		}
 		return errors.New("usage: cdp styles <name> \".selector\"")
 	}
-	name := args[0]
-	selector := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: cdp styles <name> \".selector\"")
+	}
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -752,11 +790,17 @@ func cmdRect(args []string) error {
 		}
 		return errors.New("usage: cdp rect <name> \".selector\"")
 	}
-	name := args[0]
-	selector := args[1]
-	fs.Parse(args[2:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: cdp rect <name> \".selector\"")
+	}
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -813,10 +857,16 @@ func cmdScreenshot(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return errors.New("usage: cdp screenshot <name> [--selector ...]")
+	}
+	name := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 
 	st, err := store.Load()
@@ -919,15 +969,21 @@ func cmdLog(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	fs.Parse(args)
-	if fs.NArg() < 1 {
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
 		fs.Usage()
 		return errors.New("usage: cdp log <name> [\"setup script\"]")
 	}
-	name := fs.Arg(0)
+	name := pos[0]
 	script := ""
-	if fs.NArg() > 1 {
-		script = fs.Arg(1)
+	if len(pos) > 1 {
+		script = pos[1]
+	}
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 	limit := *limitFlag
 	timeout := *timeoutFlag
@@ -1038,10 +1094,16 @@ func cmdKeepAlive(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return errors.New("usage: cdp keep-alive <name>")
+	}
+	name := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 
 	st, err := store.Load()
@@ -1144,10 +1206,16 @@ func cmdNetworkLog(args []string) error {
 		fs.Usage()
 		return nil
 	}
-	name := args[0]
-	fs.Parse(args[1:])
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return errors.New("usage: cdp network-log <name> [options]")
+	}
+	name := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 
 	filters, err := buildNetworkFilters(*urlPattern, *methodPattern, *statusPattern, *mimePattern)
@@ -1648,9 +1716,12 @@ func cmdTabsList(args []string) error {
 	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	fs.Parse(args)
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 0 {
+		return fmt.Errorf("unexpected argument: %s", pos[0])
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -1690,11 +1761,14 @@ func cmdTabsSwitch(args []string) error {
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	fs.Parse(args)
-	if fs.NArg() != 1 {
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
 		return errors.New("usage: cdp tabs switch <index|id|pattern>")
 	}
-	targetRef := fs.Arg(0)
+	targetRef := pos[0]
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -1773,10 +1847,13 @@ func cmdTabsClose(args []string) error {
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	sessionName := fs.String("session", "", "Close tab by saved session name")
-	fs.Parse(args)
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
 
 	if *sessionName != "" {
-		if fs.NArg() != 0 {
+		if len(pos) != 0 {
 			return errors.New("usage: cdp tabs close --session <name>")
 		}
 		st, err := store.Load()
@@ -1807,10 +1884,10 @@ func cmdTabsClose(args []string) error {
 		return nil
 	}
 
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return errors.New("usage: cdp tabs close <index|id|pattern>")
 	}
-	targetRef := fs.Arg(0)
+	targetRef := pos[0]
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -1907,6 +1984,53 @@ func cmdTargets(args []string) error {
 		fmt.Printf("%-12s %-6d %-30s %s\n", name, session.Port, abbreviate(session.Title, 30), session.URL)
 	}
 	return nil
+}
+
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	flagInfo := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		isBool := false
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			isBool = true
+		}
+		flagInfo[f.Name] = isBool
+	})
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			name, hasValue := splitFlagName(arg)
+			if isBool, ok := flagInfo[name]; ok {
+				flags = append(flags, arg)
+				if hasValue {
+					continue
+				}
+				if isBool {
+					if i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
+						flags = append(flags, args[i+1])
+						i++
+					}
+					continue
+				}
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("flag %s requires a value", arg)
+				}
+				flags = append(flags, args[i+1])
+				i++
+				continue
+			}
+		}
+		positionals = append(positionals, arg)
+	}
+	if err := fs.Parse(flags); err != nil {
+		return nil, err
+	}
+	return positionals, nil
 }
 
 func splitTabsOpenArgs(args []string) (string, []string, error) {
