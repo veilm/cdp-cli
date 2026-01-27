@@ -97,7 +97,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp styles <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp rect <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp screenshot <name> [--selector \".composer\"] [--output file.png]")
-	fmt.Println("  \t  cdp log <name> [\"script to eval before streaming\"]")
+	fmt.Println("  \t  cdp log <name> [\"setup script\"] [--level REGEX] [--limit N] [--timeout DURATION]")
 	fmt.Println("  \t  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]")
 	fmt.Println("  \t  cdp keep-alive <name>")
 	fmt.Println("  \t  cdp tabs list [--host 127.0.0.1 --port 9222] [--plain]")
@@ -962,9 +962,10 @@ func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[
 }
 
 func cmdLog(args []string) error {
-	fs := newFlagSet("log", "usage: cdp log <name> [\"setup script\"]")
-	limitFlag := fs.Int("limit", 100, "Maximum log entries to collect (<=0 for unlimited)")
-	timeoutFlag := fs.Duration("timeout", 15*time.Second, "Maximum time to wait for log events (0 disables)")
+	fs := newFlagSet("log", "usage: cdp log <name> [\"setup script\"] [options]")
+	limitFlag := fs.Int("limit", 0, "Maximum log entries to collect (<=0 for unlimited)")
+	timeoutFlag := fs.Duration("timeout", 0, "Maximum time to wait for log events (0 disables)")
+	levelFlag := fs.String("level", "", "Regex to filter by level/type (e.g. 'error|warning|exception')")
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -975,7 +976,7 @@ func cmdLog(args []string) error {
 	}
 	if len(pos) < 1 {
 		fs.Usage()
-		return errors.New("usage: cdp log <name> [\"setup script\"]")
+		return errors.New("usage: cdp log <name> [\"setup script\"] [options]")
 	}
 	name := pos[0]
 	script := ""
@@ -987,6 +988,14 @@ func cmdLog(args []string) error {
 	}
 	limit := *limitFlag
 	timeout := *timeoutFlag
+
+	var levelFilter *regexp.Regexp
+	if *levelFlag != "" {
+		levelFilter, err = regexp.Compile(*levelFlag)
+		if err != nil {
+			return fmt.Errorf("invalid --level regex: %w", err)
+		}
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -1025,7 +1034,7 @@ func cmdLog(args []string) error {
 	}
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
 	var timer *time.Timer
@@ -1040,11 +1049,11 @@ func cmdLog(args []string) error {
 	if limit > 0 {
 		limitInfo = strconv.Itoa(limit)
 	}
-	timeoutInfo := "disabled"
+	timeoutInfo := "none"
 	if timeout > 0 {
 		timeoutInfo = timeout.String()
 	}
-	fmt.Printf("Collecting console output (limit=%s, timeout=%s). Ctrl+C to stop early.\n", limitInfo, timeoutInfo)
+	fmt.Fprintf(os.Stderr, "Streaming console output (limit=%s, timeout=%s). Ctrl+C to stop.\n", limitInfo, timeoutInfo)
 
 	logCount := 0
 	exitReason := ""
@@ -1058,10 +1067,13 @@ loop:
 			}
 			break loop
 		case evt := <-events:
-			if err := handleLogEvent(ctx, handle.client, evt); err != nil {
+			printed, err := handleLogEvent(ctx, handle.client, evt, levelFilter)
+			if err != nil {
 				fmt.Fprintln(os.Stderr, "log handler:", err)
 			}
-			logCount++
+			if printed {
+				logCount++
+			}
 			if limit > 0 && logCount >= limit {
 				exitReason = fmt.Sprintf("limit reached (%d entries)", limit)
 				break loop
@@ -1079,7 +1091,7 @@ loop:
 	if exitReason == "" {
 		exitReason = "completed"
 	}
-	fmt.Printf("Log stream ended (%s). Entries: %d\n", exitReason, logCount)
+	fmt.Fprintf(os.Stderr, "Log stream ended (%s). Entries: %d\n", exitReason, logCount)
 	return nil
 }
 
@@ -1137,7 +1149,7 @@ func cmdKeepAlive(args []string) error {
 	return nil
 }
 
-func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) error {
+func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event, levelFilter *regexp.Regexp) (bool, error) {
 	switch evt.Method {
 	case "Runtime.consoleAPICalled":
 		var payload struct {
@@ -1145,7 +1157,10 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 			Args []cdp.RemoteObject `json:"args"`
 		}
 		if err := json.Unmarshal(evt.Params, &payload); err != nil {
-			return err
+			return false, err
+		}
+		if levelFilter != nil && !levelFilter.MatchString(payload.Type) {
+			return false, nil
 		}
 		values := make([]string, 0, len(payload.Args))
 		for _, arg := range payload.Args {
@@ -1167,6 +1182,59 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 			}
 		}
 		fmt.Printf("[%s] %s\n", payload.Type, strings.Join(values, " "))
+		return true, nil
+
+	case "Runtime.exceptionThrown":
+		if levelFilter != nil && !levelFilter.MatchString("exception") {
+			return false, nil
+		}
+		var payload struct {
+			ExceptionDetails struct {
+				Text      string `json:"text"`
+				Exception *struct {
+					Description string           `json:"description"`
+					Value       *json.RawMessage `json:"value"`
+				} `json:"exception"`
+				StackTrace *struct {
+					CallFrames []struct {
+						FunctionName string `json:"functionName"`
+						URL          string `json:"url"`
+						LineNumber   int    `json:"lineNumber"`
+						ColumnNumber int    `json:"columnNumber"`
+					} `json:"callFrames"`
+				} `json:"stackTrace"`
+			} `json:"exceptionDetails"`
+		}
+		if err := json.Unmarshal(evt.Params, &payload); err != nil {
+			return false, err
+		}
+		details := payload.ExceptionDetails
+		desc := ""
+		if details.Exception != nil {
+			desc = details.Exception.Description
+			if desc == "" && details.Exception.Value != nil {
+				desc = string(*details.Exception.Value)
+			}
+		}
+		if desc != "" {
+			// V8 Error descriptions include the stack trace already.
+			fmt.Printf("[exception] %s\n", desc)
+		} else {
+			fmt.Printf("[exception] %s\n", details.Text)
+			// Only print callFrames manually when description is absent
+			// (e.g. non-Error throw values like strings/numbers).
+			if details.StackTrace != nil {
+				for _, f := range details.StackTrace.CallFrames {
+					fn := f.FunctionName
+					if fn == "" {
+						fn = "(anonymous)"
+					}
+					fmt.Printf("  at %s (%s:%d:%d)\n", fn, f.URL, f.LineNumber+1, f.ColumnNumber+1)
+				}
+			}
+		}
+		return true, nil
+
 	case "Log.entryAdded":
 		var payload struct {
 			Entry struct {
@@ -1179,16 +1247,20 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event) erro
 			} `json:"entry"`
 		}
 		if err := json.Unmarshal(evt.Params, &payload); err != nil {
-			return err
+			return false, err
 		}
 		entry := payload.Entry
+		if levelFilter != nil && !levelFilter.MatchString(entry.Level) {
+			return false, nil
+		}
 		location := ""
 		if entry.URL != "" {
 			location = fmt.Sprintf(" (%s:%d:%d)", entry.URL, entry.Line, entry.Column)
 		}
 		fmt.Printf("[%s/%s] %s%s\n", entry.Source, entry.Level, entry.Text, location)
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func cmdNetworkLog(args []string) error {
