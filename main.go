@@ -54,6 +54,8 @@ func run() error {
 		return cmdWaitVisible(args)
 	case "click":
 		return cmdClick(args)
+	case "scroll":
+		return cmdScroll(args)
 	case "type":
 		return cmdType(args)
 	case "dom":
@@ -92,6 +94,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp wait <name> [--selector \".selector\"] [--visible]")
 	fmt.Println("  \t  cdp wait-visible <name> \".selector\"")
 	fmt.Println("  \t  cdp click <name> \".selector\"")
+	fmt.Println("  \t  cdp scroll <name> <yPx> [--x <xPx>]")
 	fmt.Println("  \t  cdp type <name> \".selector\" \"text\"")
 	fmt.Println("  \t  cdp dom <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp styles <name> \"CSS selector\"")
@@ -627,6 +630,86 @@ func cmdType(args []string) error {
 		return err
 	}
 	fmt.Printf("Typed into: %s\n", selector)
+	return nil
+}
+
+func cmdScroll(args []string) error {
+	fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>]")
+	scrollX := fs.Float64("x", 0, "Horizontal scroll delta in pixels (can be negative)")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>]")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>]")
+	}
+	name := pos[0]
+	yStr := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
+	}
+
+	scrollY, err := strconv.ParseFloat(yStr, 64)
+	if err != nil {
+		return fmt.Errorf("invalid yPx %q: %w", yStr, err)
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	yJS := strconv.FormatFloat(scrollY, 'f', -1, 64)
+	xJS := strconv.FormatFloat(*scrollX, 'f', -1, 64)
+	expression := fmt.Sprintf(`(() => {
+        const SCROLL_Y_PX = %s; // can be positive (down) or negative (up)
+        const SCROLL_X_PX = %s; // can be positive (right) or negative (left)
+
+        const el = document.scrollingElement || document.documentElement;
+
+        // Scroll in a way that triggers normal scroll handling.
+        try {
+            window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
+        } catch (e) {
+            // "instant" isn't standard; fall back for older engines.
+            window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+        }
+
+        // Nudge common listeners (some apps debounce/attach to different targets).
+        window.dispatchEvent(new Event("scroll", { bubbles: true }));
+        document.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+        // Return the new scroll position for sanity-checking.
+        return { scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
+    })()`, yJS, xJS)
+
+	value, err := handle.client.Evaluate(ctx, expression)
+	if err != nil {
+		return err
+	}
+	posMap, ok := value.(map[string]interface{})
+	if !ok {
+		fmt.Printf("Scrolled by y=%s x=%s\n", yJS, xJS)
+		return nil
+	}
+	fmt.Printf("Scrolled by y=%s x=%s -> scrollTop=%v scrollLeft=%v\n", yJS, xJS, posMap["scrollTop"], posMap["scrollLeft"])
 	return nil
 }
 
