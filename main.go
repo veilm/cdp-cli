@@ -461,11 +461,13 @@ func cmdWaitVisible(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> \".selector\"")
+	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
+	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp click <name> \".selector\"")
+		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -476,7 +478,7 @@ func cmdClick(args []string) error {
 		return err
 	}
 	if len(pos) < 2 {
-		return errors.New("usage: cdp click <name> \".selector\"")
+		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	name := pos[0]
 	selector := pos[1]
@@ -498,9 +500,56 @@ func cmdClick(args []string) error {
 	defer handle.Close()
 
 	expression := fmt.Sprintf(`(() => {
-        const el = document.querySelector(%s);
+        const selector = %s;
+        const hasTextSpec = %s;
+        const attValueSpec = %s;
+
+        function compileRegex(spec) {
+            if (!spec) return null;
+            // Support /pattern/flags or plain pattern.
+            if (spec.length >= 2 && spec[0] === "/") {
+                const last = spec.lastIndexOf("/");
+                if (last > 0) {
+                    const pattern = spec.slice(1, last);
+                    const flags = spec.slice(last + 1);
+                    try { return new RegExp(pattern, flags); } catch (e) {}
+                }
+            }
+            try { return new RegExp(spec); } catch (e) {
+                throw new Error("invalid regex: " + spec + " (" + (e && e.message ? e.message : e) + ")");
+            }
+        }
+
+        const hasTextRe = compileRegex(hasTextSpec);
+        const attValueRe = compileRegex(attValueSpec);
+
+        function elementText(el) {
+            // Prefer textContent when innerText is empty (e.g. display:none).
+            return (el && (el.innerText || el.textContent)) || "";
+        }
+
+        function attrValueMatches(el, re) {
+            const attrs = (el && el.attributes) || null;
+            if (!attrs) return false;
+            for (let i = 0; i < attrs.length; i++) {
+                const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
+                if (re.test(v)) return true;
+            }
+            return false;
+        }
+
+        const list = Array.from(document.querySelectorAll(selector));
+        let el = null;
+        for (let i = 0; i < list.length; i++) {
+            const cand = list[i];
+            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+            el = cand;
+            break;
+        }
+
         if (!el) {
-            throw new Error("selector not found: " + %s);
+            throw new Error("no element matched selector/filters: " + selector);
         }
         if (el.scrollIntoView) {
             el.scrollIntoView({block: "center", inline: "center"});
@@ -510,7 +559,7 @@ func cmdClick(args []string) error {
         }
         el.click();
         return true;
-    })()`, strconv.Quote(selector), strconv.Quote(selector))
+    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue))
 
 	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
@@ -520,12 +569,14 @@ func cmdClick(args []string) error {
 }
 
 func cmdType(args []string) error {
-	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\"")
+	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
 	appendText := fs.Bool("append", false, "Append text instead of replacing")
+	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
+	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp type <name> \".selector\" \"text\"")
+		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -536,7 +587,7 @@ func cmdType(args []string) error {
 		return err
 	}
 	if len(pos) < 3 {
-		return errors.New("usage: cdp type <name> \".selector\" \"text\"")
+		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	name := pos[0]
 	selector := pos[1]
@@ -559,9 +610,53 @@ func cmdType(args []string) error {
 	defer handle.Close()
 
 	expression := fmt.Sprintf(`(() => {
-        const el = document.querySelector(%s);
+        const selector = %s;
+        const hasTextSpec = %s;
+        const attValueSpec = %s;
+
+        function compileRegex(spec) {
+            if (!spec) return null;
+            if (spec.length >= 2 && spec[0] === "/") {
+                const last = spec.lastIndexOf("/");
+                if (last > 0) {
+                    const pattern = spec.slice(1, last);
+                    const flags = spec.slice(last + 1);
+                    try { return new RegExp(pattern, flags); } catch (e) {}
+                }
+            }
+            try { return new RegExp(spec); } catch (e) {
+                throw new Error("invalid regex: " + spec + " (" + (e && e.message ? e.message : e) + ")");
+            }
+        }
+
+        const hasTextRe = compileRegex(hasTextSpec);
+        const attValueRe = compileRegex(attValueSpec);
+
+        function elementText(el) {
+            return (el && (el.innerText || el.textContent)) || "";
+        }
+
+        function attrValueMatches(el, re) {
+            const attrs = (el && el.attributes) || null;
+            if (!attrs) return false;
+            for (let i = 0; i < attrs.length; i++) {
+                const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
+                if (re.test(v)) return true;
+            }
+            return false;
+        }
+
+        const list = Array.from(document.querySelectorAll(selector));
+        let el = null;
+        for (let i = 0; i < list.length; i++) {
+            const cand = list[i];
+            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+            el = cand;
+            break;
+        }
         if (!el) {
-            throw new Error("selector not found: " + %s);
+            throw new Error("no element matched selector/filters: " + selector);
         }
         const append = %t;
         if (el.scrollIntoView) {
@@ -595,7 +690,7 @@ func cmdType(args []string) error {
             return { found: true, editable: true, contentEditable: true };
         }
         return { found: true, editable: false, contentEditable: false };
-    })()`, strconv.Quote(selector), strconv.Quote(selector), *appendText)
+    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -617,7 +712,51 @@ func cmdType(args []string) error {
 	}
 
 	fallback := fmt.Sprintf(`(() => {
-        const el = document.querySelector(%s);
+        const selector = %s;
+        const hasTextSpec = %s;
+        const attValueSpec = %s;
+
+        function compileRegex(spec) {
+            if (!spec) return null;
+            if (spec.length >= 2 && spec[0] === "/") {
+                const last = spec.lastIndexOf("/");
+                if (last > 0) {
+                    const pattern = spec.slice(1, last);
+                    const flags = spec.slice(last + 1);
+                    try { return new RegExp(pattern, flags); } catch (e) {}
+                }
+            }
+            try { return new RegExp(spec); } catch (e) {
+                return null;
+            }
+        }
+
+        const hasTextRe = compileRegex(hasTextSpec);
+        const attValueRe = compileRegex(attValueSpec);
+
+        function elementText(el) {
+            return (el && (el.innerText || el.textContent)) || "";
+        }
+
+        function attrValueMatches(el, re) {
+            const attrs = (el && el.attributes) || null;
+            if (!attrs) return false;
+            for (let i = 0; i < attrs.length; i++) {
+                const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
+                if (re.test(v)) return true;
+            }
+            return false;
+        }
+
+        const list = Array.from(document.querySelectorAll(selector));
+        let el = null;
+        for (let i = 0; i < list.length; i++) {
+            const cand = list[i];
+            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+            el = cand;
+            break;
+        }
         if (!el) { return false; }
         const append = %t;
         if (!append) {
@@ -625,7 +764,7 @@ func cmdType(args []string) error {
         }
         el.textContent = append ? el.textContent + %s : %s;
         return true;
-    })()`, strconv.Quote(selector), *appendText, strconv.Quote(text), strconv.Quote(text))
+    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), *appendText, strconv.Quote(text), strconv.Quote(text))
 	if _, err := handle.client.Evaluate(ctx, fallback); err != nil {
 		return err
 	}
