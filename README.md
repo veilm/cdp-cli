@@ -19,7 +19,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
 - `cdp wait manager --selector ".compose"` and `cdp wait-visible manager ".compose"` pause until the page is ready.
-- `cdp click manager ".btn"` and `cdp type manager ".input" "hello"` cover basic UI automation.
+- `cdp click manager ".btn"`, `cdp type manager ".input" "hello"`, and `cdp scroll manager 800` cover basic UI automation.
 - `cdp network-log manager --dir /tmp/network --url '.*\\.json'` mirrors every Fetch response into timestamped folders so you can `tail -F` or `jq` through the saved request/response artifacts without extra tooling.
 - `cdp keep-alive manager` toggles focus/lifecycle emulation and foregrounds the tab so throttled UI pieces start rendering again.
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
