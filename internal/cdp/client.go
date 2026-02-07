@@ -331,6 +331,11 @@ func exceptionError(ctx context.Context, c *Client, details *ExceptionDetails) e
 
 // RemoteObjectValue resolves a RemoteObject into a native Go value.
 func (c *Client) RemoteObjectValue(ctx context.Context, obj RemoteObject) (interface{}, error) {
+	// CDP represents JS `null` as {type:"object", subtype:"null"} and may omit both
+	// `value` and `description`. Treat it as a Go nil so JSON output is `null`.
+	if obj.Type == "object" && obj.Subtype == "null" {
+		return nil, nil
+	}
 	if obj.Value != nil {
 		var out interface{}
 		if err := json.Unmarshal(*obj.Value, &out); err != nil {
