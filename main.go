@@ -58,6 +58,8 @@ func run() error {
 		return cmdScroll(args)
 	case "type":
 		return cmdType(args)
+	case "upload":
+		return cmdUpload(args)
 	case "dom":
 		return cmdDOM(args)
 	case "styles":
@@ -96,6 +98,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp click <name> \".selector\"")
 	fmt.Println("  \t  cdp scroll <name> <yPx> [--x <xPx>]")
 	fmt.Println("  \t  cdp type <name> \".selector\" \"text\"")
+	fmt.Println("  \t  cdp upload <name> \"input[type=file]\" <file1> [file2 ...]")
 	fmt.Println("  \t  cdp dom <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp styles <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp rect <name> \"CSS selector\"")
@@ -852,6 +855,104 @@ func cmdScroll(args []string) error {
 	return nil
 }
 
+func cmdUpload(args []string) error {
+	fs := newFlagSet("upload", "usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	waitFlag := fs.Bool("wait", false, "Wait for the selector to exist before uploading")
+	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval when using --wait")
+	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 3 {
+		return errors.New("usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	}
+	name := pos[0]
+	selector := pos[1]
+	filesRaw := pos[2:]
+
+	files := make([]string, 0, len(filesRaw))
+	for _, f := range filesRaw {
+		p, err := expandPath(f)
+		if err != nil {
+			return err
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return fmt.Errorf("not a file: %s", abs)
+		}
+		files = append(files, abs)
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	if *waitFlag {
+		if err := waitForSelector(ctx, handle.client, selector, *poll); err != nil {
+			return err
+		}
+	}
+
+	if err := handle.client.Call(ctx, "DOM.enable", nil, nil); err != nil {
+		return err
+	}
+	nodeID, err := resolveNodeID(ctx, handle.client, selector)
+	if err != nil {
+		return err
+	}
+	if nodeID == 0 {
+		return fmt.Errorf("no element matched selector: %s", selector)
+	}
+	if err := handle.client.Call(ctx, "DOM.setFileInputFiles", map[string]interface{}{
+		"nodeId": nodeID,
+		"files":  files,
+	}, nil); err != nil {
+		return err
+	}
+
+	// Nudge frameworks that listen to change events only.
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) return false;
+        try {
+            el.dispatchEvent(new Event("input", {bubbles: true}));
+            el.dispatchEvent(new Event("change", {bubbles: true}));
+        } catch (e) {}
+        return true;
+    })()`, strconv.Quote(selector))
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+
+	fmt.Printf("Uploaded %d file(s) into %s\n", len(files), selector)
+	return nil
+}
+
 func cmdDOM(args []string) error {
 	fs := newFlagSet("dom", "usage: cdp dom <name> \".selector\"")
 	pretty := fs.Bool("pretty", true, "Pretty print output")
@@ -1181,6 +1282,41 @@ func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[
 		"scale":  1,
 	}
 	return clip, nil
+}
+
+func resolveNodeID(ctx context.Context, client *cdp.Client, selector string) (int, error) {
+	var doc struct {
+		Root struct {
+			NodeID int `json:"nodeId"`
+		} `json:"root"`
+	}
+	if err := client.Call(ctx, "DOM.getDocument", map[string]interface{}{"depth": -1, "pierce": true}, &doc); err != nil {
+		return 0, err
+	}
+	var node struct {
+		NodeID int `json:"nodeId"`
+	}
+	if err := client.Call(ctx, "DOM.querySelector", map[string]interface{}{
+		"nodeId":   doc.Root.NodeID,
+		"selector": selector,
+	}, &node); err != nil {
+		return 0, err
+	}
+	return node.NodeID, nil
+}
+
+func expandPath(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if path == "~" {
+			return home, nil
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
 }
 
 func cmdLog(args []string) error {
