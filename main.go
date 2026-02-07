@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/signal"
@@ -102,7 +106,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp dom <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp styles <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp rect <name> \"CSS selector\"")
-	fmt.Println("  \t  cdp screenshot <name> [--selector \".composer\"] [--output file.png]")
+	fmt.Println("  \t  cdp screenshot <name> [--selector \".composer\"] [--output file.png] [--full-page] [--cdp-clip]")
 	fmt.Println("  \t  cdp log <name> [\"setup script\"] [--level REGEX] [--limit N] [--timeout DURATION]")
 	fmt.Println("  \t  cdp network-log <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]")
 	fmt.Println("  \t  cdp keep-alive <name>")
@@ -1171,6 +1175,9 @@ func cmdScreenshot(args []string) error {
 	fs := newFlagSet("screenshot", "usage: cdp screenshot <name> [--selector ...]")
 	selector := fs.String("selector", "", "CSS selector to crop")
 	output := fs.String("output", "screenshot.png", "Output file path")
+	fullPage := fs.Bool("full-page", false, "Capture beyond the current viewport (may cause resize/reflow in headful Chrome)")
+	cdpClip := fs.Bool("cdp-clip", false, "When using --selector, crop via CDP clip (may resize/reflow); default is capture viewport then crop locally")
+	scrollIntoView := fs.Bool("scroll-into-view", true, "When using --selector (without --cdp-clip), scroll the element into view before capture")
 	timeout := fs.Duration("timeout", 15*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
@@ -1205,19 +1212,50 @@ func cmdScreenshot(args []string) error {
 	defer handle.Close()
 
 	params := map[string]interface{}{
-		"format":                "png",
-		"captureBeyondViewport": true,
+		"format":      "png",
+		"fromSurface": true,
 	}
 
+	// Default to "viewport only" to avoid the headful flicker/resize path in Chromium.
+	// `captureBeyondViewport=true` is still available via --full-page (or --cdp-clip).
+	params["captureBeyondViewport"] = *fullPage
+
+	var crop *screenshotCrop
 	if *selector != "" {
-		clip, err := resolveClip(ctx, handle.client, *selector)
-		if err != nil {
-			return err
+		if *cdpClip {
+			clip, err := resolveClip(ctx, handle.client, *selector)
+			if err != nil {
+				return err
+			}
+			if clip == nil {
+				return fmt.Errorf("selector %s not found", *selector)
+			}
+			params["clip"] = clip
+			params["captureBeyondViewport"] = true
+		} else {
+			// Compute a viewport-relative crop rect, then crop locally to avoid Chromium resizing the view.
+			if *scrollIntoView {
+				if err := handle.client.Call(ctx, "DOM.enable", nil, nil); err != nil {
+					return err
+				}
+				nodeID, err := resolveNodeID(ctx, handle.client, *selector)
+				if err != nil {
+					return err
+				}
+				if nodeID == 0 {
+					return fmt.Errorf("selector %s not found", *selector)
+				}
+				_ = handle.client.Call(ctx, "DOM.scrollIntoViewIfNeeded", map[string]interface{}{"nodeId": nodeID}, nil)
+			}
+			var err error
+			crop, err = resolveViewportCrop(ctx, handle.client, *selector)
+			if err != nil {
+				return err
+			}
+			if crop == nil {
+				return fmt.Errorf("selector %s not found", *selector)
+			}
 		}
-		if clip == nil {
-			return fmt.Errorf("selector %s not found", *selector)
-		}
-		params["clip"] = clip
 	}
 
 	var shot struct {
@@ -1230,11 +1268,141 @@ func cmdScreenshot(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	if crop != nil {
+		cropped, err := cropPNG(data, *crop)
+		if err != nil {
+			return err
+		}
+		data = cropped
+	}
+
 	if err := os.WriteFile(*output, data, 0o644); err != nil {
 		return err
 	}
 	fmt.Printf("Saved %s (%d bytes)\n", *output, len(data))
 	return nil
+}
+
+type screenshotCrop struct {
+	X      float64
+	Y      float64
+	Width  float64
+	Height float64
+	DPR    float64
+}
+
+func resolveViewportCrop(ctx context.Context, client *cdp.Client, selector string) (*screenshotCrop, error) {
+	expression := fmt.Sprintf(`(() => {
+        const el = document.querySelector(%s);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const dpr = (typeof window !== "undefined" && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+        return {x: r.left, y: r.top, width: r.width, height: r.height, dpr};
+    })()`, strconv.Quote(selector))
+
+	value, err := client.Evaluate(ctx, expression)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, nil
+	}
+	raw, ok := value.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected crop result type %T", value)
+	}
+
+	getNum := func(key string) (float64, error) {
+		v, ok := raw[key]
+		if !ok {
+			return 0, fmt.Errorf("missing %q in crop result", key)
+		}
+		n, ok := v.(float64)
+		if !ok {
+			return 0, fmt.Errorf("unexpected %q type %T", key, v)
+		}
+		return n, nil
+	}
+
+	x, err := getNum("x")
+	if err != nil {
+		return nil, err
+	}
+	y, err := getNum("y")
+	if err != nil {
+		return nil, err
+	}
+	w, err := getNum("width")
+	if err != nil {
+		return nil, err
+	}
+	h, err := getNum("height")
+	if err != nil {
+		return nil, err
+	}
+	dpr, err := getNum("dpr")
+	if err != nil {
+		return nil, err
+	}
+	if dpr <= 0 {
+		dpr = 1
+	}
+	return &screenshotCrop{X: x, Y: y, Width: w, Height: h, DPR: dpr}, nil
+}
+
+func cropPNG(pngBytes []byte, crop screenshotCrop) ([]byte, error) {
+	img, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, err
+	}
+	b := img.Bounds()
+
+	// Convert CSS px (viewport) -> image px. Use floor/ceil to avoid off-by-one clipping.
+	left := int(math.Floor(crop.X * crop.DPR))
+	top := int(math.Floor(crop.Y * crop.DPR))
+	right := int(math.Ceil((crop.X + crop.Width) * crop.DPR))
+	bottom := int(math.Ceil((crop.Y + crop.Height) * crop.DPR))
+
+	// Clamp to image bounds.
+	if left < b.Min.X {
+		left = b.Min.X
+	}
+	if top < b.Min.Y {
+		top = b.Min.Y
+	}
+	if right > b.Max.X {
+		right = b.Max.X
+	}
+	if bottom > b.Max.Y {
+		bottom = b.Max.Y
+	}
+	if right <= left || bottom <= top {
+		return nil, fmt.Errorf("crop rectangle is empty after clamping (x=%d y=%d w=%d h=%d)", left, top, right-left, bottom-top)
+	}
+
+	r := image.Rect(left, top, right, bottom)
+	var sub image.Image
+	if si, ok := img.(interface {
+		SubImage(r image.Rectangle) image.Image
+	}); ok {
+		sub = si.SubImage(r)
+	} else {
+		// Fallback: copy pixels into a new RGBA buffer.
+		dst := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+		for y := 0; y < r.Dy(); y++ {
+			for x := 0; x < r.Dx(); x++ {
+				dst.Set(x, y, img.At(r.Min.X+x, r.Min.Y+y))
+			}
+		}
+		sub = dst
+	}
+
+	var out bytes.Buffer
+	if err := png.Encode(&out, sub); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[string]interface{}, error) {
@@ -1274,9 +1442,22 @@ func resolveClip(ctx context.Context, client *cdp.Client, selector string) (map[
 	if len(box.Model.Content) < 2 {
 		return nil, errors.New("element has no box model")
 	}
+
+	// DOM box model coordinates are viewport-relative. `Page.captureScreenshot` clip expects
+	// document/page coordinates, so we offset by the visual viewport scroll position.
+	var metrics struct {
+		VisualViewport struct {
+			PageX float64 `json:"pageX"`
+			PageY float64 `json:"pageY"`
+		} `json:"visualViewport"`
+	}
+	if err := client.Call(ctx, "Page.getLayoutMetrics", nil, &metrics); err != nil {
+		return nil, err
+	}
+
 	clip := map[string]interface{}{
-		"x":      box.Model.Content[0],
-		"y":      box.Model.Content[1],
+		"x":      box.Model.Content[0] + metrics.VisualViewport.PageX,
+		"y":      box.Model.Content[1] + metrics.VisualViewport.PageY,
 		"width":  box.Model.Width,
 		"height": box.Model.Height,
 		"scale":  1,
