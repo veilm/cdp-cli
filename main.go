@@ -1354,7 +1354,7 @@ fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>] [--elemen
 		fmt.Printf("Scrolled by y=%s x=%s\n", yJS, xJS)
 		return nil
 	}
-	fmt.Printf("Scrolled by y=%s x=%s -> scrollTop=%v scrollLeft=%v\n", yJS, xJS, posMap["scrollTop"], posMap["scrollLeft"])
+	fmt.Printf("Scrolled by y=%s x=%s -> scrollTop=%s scrollLeft=%s\n", yJS, xJS, formatScrollNumber(posMap["scrollTop"]), formatScrollNumber(posMap["scrollLeft"]))
 	return nil
 }
 
@@ -1983,6 +1983,21 @@ func resolveNodeID(ctx context.Context, client *cdp.Client, selector string) (in
 		return 0, err
 	}
 	return node.NodeID, nil
+}
+
+func formatScrollNumber(value interface{}) string {
+	n, ok := value.(float64)
+	if !ok {
+		return fmt.Sprint(value)
+	}
+	rounded := math.Round(n*100) / 100
+	s := strconv.FormatFloat(rounded, 'f', 2, 64)
+	s = strings.TrimSuffix(s, "00")
+	s = strings.TrimSuffix(s, "0")
+	if strings.HasSuffix(s, ".") {
+		s = strings.TrimSuffix(s, ".")
+	}
+	return s
 }
 
 func parseInlineHasText(selector string) (string, string, bool, error) {
