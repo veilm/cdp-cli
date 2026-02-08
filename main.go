@@ -58,6 +58,12 @@ func run() error {
 		return cmdWaitVisible(args)
 	case "click":
 		return cmdClick(args)
+	case "hover":
+		return cmdHover(args)
+	case "drag":
+		return cmdDrag(args)
+	case "draw":
+		return cmdDraw(args)
 	case "scroll":
 		return cmdScroll(args)
 	case "type":
@@ -100,6 +106,9 @@ func printUsage() {
 	fmt.Println("  \t  cdp wait <name> [--selector \".selector\"] [--visible]")
 	fmt.Println("  \t  cdp wait-visible <name> \".selector\"")
 	fmt.Println("  \t  cdp click <name> \".selector\"")
+	fmt.Println("  \t  cdp hover <name> \".selector\"")
+	fmt.Println("  \t  cdp drag <name> \".from\" \".to\"")
+	fmt.Println("  \t  cdp draw <name> \".selector\"")
 	fmt.Println("  \t  cdp scroll <name> <yPx> [--x <xPx>]")
 	fmt.Println("  \t  cdp type <name> \".selector\" \"text\"")
 	fmt.Println("  \t  cdp upload <name> \"input[type=file]\" <file1> [file2 ...]")
@@ -575,15 +584,15 @@ func cmdClick(args []string) error {
 	return nil
 }
 
-func cmdType(args []string) error {
-	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
-	appendText := fs.Bool("append", false, "Append text instead of replacing")
+func cmdHover(args []string) error {
+	fs := newFlagSet("hover", "usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	hold := fs.Duration("hold", 0, "Optional time to wait after hovering")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -593,14 +602,13 @@ func cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 3 {
-		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	if len(pos) < 2 {
+		return errors.New("usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	name := pos[0]
 	selector := pos[1]
-	text := pos[2]
-	if len(pos) > 3 {
-		return fmt.Errorf("unexpected argument: %s", pos[3])
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 
 	st, err := store.Load()
@@ -665,6 +673,394 @@ func cmdType(args []string) error {
         if (!el) {
             throw new Error("no element matched selector/filters: " + selector);
         }
+        if (el.scrollIntoView) {
+            el.scrollIntoView({block: "center", inline: "center"});
+        }
+        if (el.focus) {
+            el.focus();
+        }
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+
+        function dispatchMouse(type) {
+            const evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y});
+            el.dispatchEvent(evt);
+        }
+
+        if (typeof PointerEvent !== "undefined") {
+            const pe = (type) => new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, pointerType: "mouse"});
+            el.dispatchEvent(pe("pointerenter"));
+            el.dispatchEvent(pe("pointerover"));
+            el.dispatchEvent(pe("pointermove"));
+        }
+
+        dispatchMouse("mouseenter");
+        dispatchMouse("mouseover");
+        dispatchMouse("mousemove");
+        return {x, y};
+    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue))
+
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+	if *hold > 0 {
+		time.Sleep(*hold)
+	}
+	fmt.Printf("Hovered: %s\n", selector)
+	return nil
+}
+
+func cmdDrag(args []string) error {
+	fs := newFlagSet("drag", "usage: cdp drag <name> \".from\" \".to\"")
+	fromIndex := fs.Int("from-index", 0, "Index within the source selector (0-based)")
+	toIndex := fs.Int("to-index", 0, "Index within the target selector (0-based)")
+	delay := fs.Duration("delay", 0, "Delay between drag events (e.g. 50ms)")
+	timeout := fs.Duration("timeout", 8*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp drag <name> \".from\" \".to\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 3 {
+		return errors.New("usage: cdp drag <name> \".from\" \".to\"")
+	}
+	name := pos[0]
+	fromSelector := pos[1]
+	toSelector := pos[2]
+	if len(pos) > 3 {
+		return fmt.Errorf("unexpected argument: %s", pos[3])
+	}
+	if *fromIndex < 0 || *toIndex < 0 {
+		return errors.New("indices must be >= 0")
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	delayMS := delay.Milliseconds()
+	expression := fmt.Sprintf(`(async () => {
+        const fromSelector = %s;
+        const toSelector = %s;
+        const fromIndex = %d;
+        const toIndex = %d;
+        const delayMs = %d;
+
+        function sleep(ms) {
+            if (!ms || ms <= 0) return Promise.resolve();
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function pick(selector, index) {
+            const list = Array.from(document.querySelectorAll(selector));
+            if (!list.length) return {el: null, list};
+            const idx = Math.min(Math.max(index, 0), list.length - 1);
+            return {el: list[idx], list};
+        }
+
+        const fromPick = pick(fromSelector, fromIndex);
+        const toPick = pick(toSelector, toIndex);
+        if (!fromPick.el) throw new Error("no element matched selector: " + fromSelector);
+        if (!toPick.el) throw new Error("no element matched selector: " + toSelector);
+
+        const fromEl = fromPick.el;
+        const toEl = toPick.el;
+
+        const fromRect = fromEl.getBoundingClientRect();
+        const toRect = toEl.getBoundingClientRect();
+        const fromPt = {x: fromRect.left + Math.max(2, Math.min(fromRect.width - 2, fromRect.width / 2)),
+                        y: fromRect.top + Math.max(2, Math.min(fromRect.height - 2, fromRect.height / 2))};
+        const toPt = {x: toRect.left + Math.max(2, Math.min(toRect.width - 2, toRect.width / 2)),
+                      y: toRect.top + Math.max(2, Math.min(toRect.height - 2, toRect.height / 2))};
+
+        let dataTransfer = null;
+        if (typeof DataTransfer !== "undefined") {
+            dataTransfer = new DataTransfer();
+        } else {
+            dataTransfer = {
+                data: {},
+                setData(type, val) { this.data[type] = String(val); },
+                getData(type) { return this.data[type] || ""; },
+                clearData(type) { if (type) delete this.data[type]; else this.data = {}; },
+                effectAllowed: "all",
+                dropEffect: "move",
+                types: [],
+            };
+        }
+
+        function dispatchMouse(el, type, pt) {
+            const evt = new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: pt.x,
+                clientY: pt.y,
+                button: 0,
+                buttons: type === "mouseup" ? 0 : 1,
+            });
+            el.dispatchEvent(evt);
+        }
+
+        function dispatchDrag(el, type, pt) {
+            const evt = new DragEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: pt.x,
+                clientY: pt.y,
+                dataTransfer,
+            });
+            el.dispatchEvent(evt);
+        }
+
+        if (fromEl.scrollIntoView) fromEl.scrollIntoView({block: "center", inline: "center"});
+        if (toEl.scrollIntoView) toEl.scrollIntoView({block: "center", inline: "center"});
+
+        dispatchMouse(fromEl, "mousedown", fromPt);
+        dispatchDrag(fromEl, "dragstart", fromPt);
+        await sleep(delayMs);
+        dispatchDrag(toEl, "dragenter", toPt);
+        dispatchDrag(toEl, "dragover", toPt);
+        await sleep(delayMs);
+        dispatchDrag(toEl, "drop", toPt);
+        dispatchDrag(fromEl, "dragend", toPt);
+        dispatchMouse(toEl, "mouseup", toPt);
+        return {fromIndex, toIndex, fromCount: fromPick.list.length, toCount: toPick.list.length};
+    })()`, strconv.Quote(fromSelector), strconv.Quote(toSelector), *fromIndex, *toIndex, delayMS)
+
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+	fmt.Printf("Dragged: %s[%d] -> %s[%d]\n", fromSelector, *fromIndex, toSelector, *toIndex)
+	return nil
+}
+
+func cmdDraw(args []string) error {
+	fs := newFlagSet("draw", "usage: cdp draw <name> \".selector\"")
+	strokes := fs.Int("strokes", 3, "Number of strokes to draw")
+	delay := fs.Duration("delay", 80*time.Millisecond, "Delay between pointer events")
+	timeout := fs.Duration("timeout", 12*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp draw <name> \".selector\"")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: cdp draw <name> \".selector\"")
+	}
+	name := pos[0]
+	selector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
+	}
+	if *strokes <= 0 {
+		return errors.New("--strokes must be >= 1")
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	delayMS := delay.Milliseconds()
+	expression := fmt.Sprintf(`(async () => {
+        const selector = %s;
+        const strokes = %d;
+        const delayMs = %d;
+
+        function sleep(ms) {
+            if (!ms || ms <= 0) return Promise.resolve();
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        const el = document.querySelector(selector);
+        if (!el) throw new Error("no element matched selector: " + selector);
+
+        if (el.scrollIntoView) {
+            el.scrollIntoView({block: "center", inline: "center"});
+        }
+        if (el.focus) {
+            el.focus();
+        }
+
+        const rect = el.getBoundingClientRect();
+        const padX = Math.max(4, rect.width * 0.1);
+        const padY = Math.max(4, rect.height * 0.1);
+        const startX = rect.left + padX;
+        const endX = rect.right - padX;
+        const usableH = Math.max(1, rect.height - padY * 2);
+        const stepY = usableH / Math.max(1, strokes);
+
+        function dispatchPointer(type, x, y, isDown) {
+            if (typeof PointerEvent !== "undefined") {
+                el.dispatchEvent(new PointerEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: x,
+                    clientY: y,
+                    pointerType: "mouse",
+                    button: 0,
+                    buttons: isDown ? 1 : 0,
+                }));
+            }
+        }
+
+        function dispatchMouse(type, x, y, isDown) {
+            el.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+                button: 0,
+                buttons: isDown ? 1 : 0,
+            }));
+        }
+
+        for (let i = 0; i < strokes; i++) {
+            const y = rect.top + padY + stepY * i + stepY * 0.5;
+            const sx = startX;
+            const ex = endX;
+            dispatchPointer("pointerdown", sx, y, true);
+            dispatchMouse("mousedown", sx, y, true);
+            await sleep(delayMs);
+            dispatchPointer("pointermove", ex, y, true);
+            dispatchMouse("mousemove", ex, y, true);
+            await sleep(delayMs);
+            dispatchPointer("pointerup", ex, y, false);
+            dispatchMouse("mouseup", ex, y, false);
+            await sleep(delayMs);
+        }
+        return {strokes};
+    })()`, strconv.Quote(selector), *strokes, delayMS)
+
+	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+		return err
+	}
+	fmt.Printf("Drew %d stroke(s) on: %s\n", *strokes, selector)
+	return nil
+}
+
+func cmdType(args []string) error {
+	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	appendText := fs.Bool("append", false, "Append text instead of replacing")
+	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
+	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 3 {
+		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	}
+	name := pos[0]
+	selector := pos[1]
+	text := pos[2]
+	if len(pos) > 3 {
+		return fmt.Errorf("unexpected argument: %s", pos[3])
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	expression := fmt.Sprintf(`(() => {
+        const selector = %s;
+        const hasTextSpec = %s;
+        const attValueSpec = %s;
+        const inputText = %s;
+
+        function compileRegex(spec) {
+            if (!spec) return null;
+            if (spec.length >= 2 && spec[0] === "/") {
+                const last = spec.lastIndexOf("/");
+                if (last > 0) {
+                    const pattern = spec.slice(1, last);
+                    const flags = spec.slice(last + 1);
+                    try { return new RegExp(pattern, flags); } catch (e) {}
+                }
+            }
+            try { return new RegExp(spec); } catch (e) {
+                throw new Error("invalid regex: " + spec + " (" + (e && e.message ? e.message : e) + ")");
+            }
+        }
+
+        const hasTextRe = compileRegex(hasTextSpec);
+        const attValueRe = compileRegex(attValueSpec);
+
+        function elementText(el) {
+            return (el && (el.innerText || el.textContent)) || "";
+        }
+
+        function attrValueMatches(el, re) {
+            const attrs = (el && el.attributes) || null;
+            if (!attrs) return false;
+            for (let i = 0; i < attrs.length; i++) {
+                const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
+                if (re.test(v)) return true;
+            }
+            return false;
+        }
+
+        const list = Array.from(document.querySelectorAll(selector));
+        let el = null;
+        for (let i = 0; i < list.length; i++) {
+            const cand = list[i];
+            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+            el = cand;
+            break;
+        }
+        if (!el) {
+            throw new Error("no element matched selector/filters: " + selector);
+        }
         const append = %t;
         if (el.scrollIntoView) {
             el.scrollIntoView({block: "center", inline: "center"});
@@ -675,14 +1071,33 @@ func cmdType(args []string) error {
         const tag = el.tagName ? el.tagName.toLowerCase() : "";
         const isTextInput = tag === "input" || tag === "textarea";
         if (isTextInput) {
+            const inputType = (el.getAttribute && el.getAttribute("type") ? el.getAttribute("type") : el.type) || "";
+            const normalizedType = inputType ? String(inputType).toLowerCase() : "";
+            const useNativeValue = tag === "input" && normalizedType === "number";
+            if (useNativeValue) {
+                const next = append ? String(el.value || "") + String(inputText) : String(inputText);
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                if (setter) {
+                    setter.call(el, next);
+                } else {
+                    el.value = next;
+                }
+                try {
+                    el.dispatchEvent(new Event("input", {bubbles: true}));
+                    el.dispatchEvent(new Event("change", {bubbles: true}));
+                } catch (e) {}
+                return { found: true, editable: true, contentEditable: false, handled: true };
+            }
             if (!append) {
                 el.value = "";
             }
             if (el.setSelectionRange) {
-                const end = el.value.length;
-                el.setSelectionRange(end, end);
+                try {
+                    const end = el.value.length;
+                    el.setSelectionRange(end, end);
+                } catch (e) {}
             }
-            return { found: true, editable: true, contentEditable: false };
+            return { found: true, editable: true, contentEditable: false, handled: false };
         }
         if (el.isContentEditable) {
             if (!append) {
@@ -694,10 +1109,10 @@ func cmdType(args []string) error {
             const sel = window.getSelection();
             sel.removeAllRanges();
             sel.addRange(range);
-            return { found: true, editable: true, contentEditable: true };
+            return { found: true, editable: true, contentEditable: true, handled: false };
         }
-        return { found: true, editable: false, contentEditable: false };
-    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), *appendText)
+        return { found: true, editable: false, contentEditable: false, handled: false };
+    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -706,6 +1121,10 @@ func cmdType(args []string) error {
 	state, ok := value.(map[string]interface{})
 	if !ok || state["found"] != true {
 		return errors.New("selector not found")
+	}
+	if handled, _ := state["handled"].(bool); handled {
+		fmt.Printf("Typed into: %s\n", selector)
+		return nil
 	}
 	editable, _ := state["editable"].(bool)
 	if editable {
@@ -780,12 +1199,14 @@ func cmdType(args []string) error {
 }
 
 func cmdScroll(args []string) error {
-	fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>]")
+fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	scrollX := fs.Float64("x", 0, "Horizontal scroll delta in pixels (can be negative)")
+	element := fs.String("element", "", "Scroll inside an element matched by selector")
+	emit := fs.Bool("emit", true, "Dispatch scroll events after scrolling")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>]")
+		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -796,7 +1217,7 @@ func cmdScroll(args []string) error {
 		return err
 	}
 	if len(pos) < 2 {
-		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>]")
+		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	}
 	name := pos[0]
 	yStr := pos[1]
@@ -827,24 +1248,48 @@ func cmdScroll(args []string) error {
 	expression := fmt.Sprintf(`(() => {
         const SCROLL_Y_PX = %s; // can be positive (down) or negative (up)
         const SCROLL_X_PX = %s; // can be positive (right) or negative (left)
+        const ELEMENT_SELECTOR = %s;
+        const EMIT = %t;
 
-        const el = document.scrollingElement || document.documentElement;
-
-        // Scroll in a way that triggers normal scroll handling.
-        try {
-            window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
-        } catch (e) {
-            // "instant" isn't standard; fall back for older engines.
-            window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+        const el = ELEMENT_SELECTOR ? document.querySelector(ELEMENT_SELECTOR) : (document.scrollingElement || document.documentElement);
+        if (ELEMENT_SELECTOR && !el) {
+            throw new Error("no element matched selector: " + ELEMENT_SELECTOR);
         }
 
-        // Nudge common listeners (some apps debounce/attach to different targets).
-        window.dispatchEvent(new Event("scroll", { bubbles: true }));
-        document.dispatchEvent(new Event("scroll", { bubbles: true }));
+        if (ELEMENT_SELECTOR) {
+            try {
+                el.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
+            } catch (e) {
+                try {
+                    el.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+                } catch (e2) {
+                    el.scrollTop = (el.scrollTop || 0) + SCROLL_Y_PX;
+                    el.scrollLeft = (el.scrollLeft || 0) + SCROLL_X_PX;
+                }
+            }
+        } else {
+            // Scroll in a way that triggers normal scroll handling.
+            try {
+                window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
+            } catch (e) {
+                // "instant" isn't standard; fall back for older engines.
+                window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+            }
+        }
+
+        if (EMIT) {
+            const evt = new Event("scroll", { bubbles: true });
+            if (ELEMENT_SELECTOR) {
+                el.dispatchEvent(evt);
+            } else {
+                window.dispatchEvent(evt);
+                document.dispatchEvent(evt);
+            }
+        }
 
         // Return the new scroll position for sanity-checking.
         return { scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
-    })()`, yJS, xJS)
+    })()`, yJS, xJS, strconv.Quote(*element), *emit)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {

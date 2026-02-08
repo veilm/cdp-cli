@@ -20,7 +20,14 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
 - `cdp wait manager --selector ".compose"` and `cdp wait-visible manager ".compose"` pause until the page is ready.
-- `cdp click manager ".btn"`, `cdp type manager ".input" "hello"`, `cdp scroll manager 800`, and `cdp upload manager "input[type=file]" ./file.txt` cover basic UI automation.
+- Basic UI automation examples:
+- `cdp click manager ".btn"`
+- `cdp hover manager ".card"`
+- `cdp drag manager ".piece" ".slot"`
+- `cdp draw manager "canvas"`
+- `cdp type manager ".input" "hello"`
+- `cdp scroll manager 800 --element ".scroll-pane"`
+- `cdp upload manager "input[type=file]" ./file.txt`
 - `cdp upload` supports multiple files and can `--wait` for the selector to exist (with `--poll` and `--timeout`).
 - `cdp network-log manager --dir /tmp/network --url '.*\\.json'` mirrors every Fetch response into timestamped folders so you can `tail -F` or `jq` through the saved request/response artifacts without extra tooling.
 - `cdp keep-alive manager` toggles focus/lifecycle emulation and foregrounds the tab so throttled UI pieces start rendering again.
