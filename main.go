@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/veilm/cdp-cli/internal/cdp"
 	"github.com/veilm/cdp-cli/internal/format"
@@ -477,7 +478,7 @@ func cmdWaitVisible(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
@@ -500,6 +501,14 @@ func cmdClick(args []string) error {
 	selector := pos[1]
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
+	}
+	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
+	if err != nil {
+		return err
+	}
+	hasTextValue := *hasText
+	if hasInline {
+		hasTextValue = inlineHasText
 	}
 
 	st, err := store.Load()
@@ -575,7 +584,7 @@ func cmdClick(args []string) error {
         }
         el.click();
         return true;
-    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue))
 
 	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
@@ -585,7 +594,7 @@ func cmdClick(args []string) error {
 }
 
 func cmdHover(args []string) error {
-	fs := newFlagSet("hover", "usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+	fs := newFlagSet("hover", "usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	hold := fs.Duration("hold", 0, "Optional time to wait after hovering")
@@ -609,6 +618,14 @@ func cmdHover(args []string) error {
 	selector := pos[1]
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
+	}
+	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
+	if err != nil {
+		return err
+	}
+	hasTextValue := *hasText
+	if hasInline {
+		hasTextValue = inlineHasText
 	}
 
 	st, err := store.Load()
@@ -699,7 +716,7 @@ func cmdHover(args []string) error {
         dispatchMouse("mouseover");
         dispatchMouse("mousemove");
         return {x, y};
-    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue))
 
 	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
@@ -1000,7 +1017,7 @@ func cmdGesture(args []string) error {
 }
 
 func cmdType(args []string) error {
-	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	appendText := fs.Bool("append", false, "Append text instead of replacing")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
@@ -1025,6 +1042,14 @@ func cmdType(args []string) error {
 	text := pos[2]
 	if len(pos) > 3 {
 		return fmt.Errorf("unexpected argument: %s", pos[3])
+	}
+	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
+	if err != nil {
+		return err
+	}
+	hasTextValue := *hasText
+	if hasInline {
+		hasTextValue = inlineHasText
 	}
 
 	st, err := store.Load()
@@ -1141,7 +1166,7 @@ func cmdType(args []string) error {
             return { found: true, editable: true, contentEditable: true, handled: false };
         }
         return { found: true, editable: false, contentEditable: false, handled: false };
-    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), strconv.Quote(text), *appendText)
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue), strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -1219,7 +1244,7 @@ func cmdType(args []string) error {
         }
         el.textContent = append ? el.textContent + %s : %s;
         return true;
-    })()`, strconv.Quote(selector), strconv.Quote(*hasText), strconv.Quote(*attValue), *appendText, strconv.Quote(text), strconv.Quote(text))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue), *appendText, strconv.Quote(text), strconv.Quote(text))
 	if _, err := handle.client.Evaluate(ctx, fallback); err != nil {
 		return err
 	}
@@ -1958,6 +1983,58 @@ func resolveNodeID(ctx context.Context, client *cdp.Client, selector string) (in
 		return 0, err
 	}
 	return node.NodeID, nil
+}
+
+func parseInlineHasText(selector string) (string, string, bool, error) {
+	trimmed := strings.TrimRightFunc(selector, unicode.IsSpace)
+	if trimmed == "" {
+		return selector, "", false, nil
+	}
+
+	count := strings.Count(trimmed, "has-text(")
+	if count == 0 {
+		return selector, "", false, nil
+	}
+	if count > 1 {
+		// Treat as literal if multiple occurrences are present.
+		return selector, "", false, nil
+	}
+
+	last := strings.LastIndex(trimmed, "has-text(")
+	if last < 0 {
+		return selector, "", false, nil
+	}
+
+	start := last
+	prefixLen := len("has-text(")
+	if last > 0 && trimmed[last-1] == ':' {
+		start = last - 1
+		prefixLen = len(":has-text(")
+	}
+
+	if !strings.HasSuffix(trimmed, ")") {
+		return selector, "", false, errors.New("inline has-text() must appear at the end of the selector")
+	}
+
+	// If the only occurrence is not at the end, it's unsupported.
+	if start+prefixLen >= len(trimmed) || start+prefixLen > len(trimmed)-1 {
+		return selector, "", false, errors.New("inline has-text() must appear at the end of the selector")
+	}
+
+	content := trimmed[start+prefixLen : len(trimmed)-1]
+
+	// Strip edge quotes if they wrap the entire content and don't appear inside.
+	if len(content) >= 2 {
+		q := content[0]
+		if (q == '"' || q == '\'') && content[len(content)-1] == q {
+			if strings.Count(content, string(q)) == 2 {
+				content = content[1 : len(content)-1]
+			}
+		}
+	}
+
+	base := strings.TrimRightFunc(trimmed[:start], unicode.IsSpace)
+	return base, content, true, nil
 }
 
 func expandPath(path string) (string, error) {

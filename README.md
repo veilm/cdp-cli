@@ -13,6 +13,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp eval manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
 - `cdp eval manager --json --wait "({ready: document.readyState})"` can wait for load and JSON-serialize values.
 - Tip: if your JS starts with an object literal, wrap it like `({a: 1})` so it isn't parsed as a block.
+- Tip: `click`, `type`, and `hover` also accept inline `:has-text(...)` at the end of the selector (e.g. `.btn:has-text(Submit)`), which maps to `--has-text`.
 - `cdp rect manager ".selector"` prints a DOMRect snapshot.
 - `cdp tabs list --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
 - `cdp connect manager --tab 3 --port 9222` binds a session by tab index or pattern.
