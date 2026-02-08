@@ -26,6 +26,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp hover manager ".card"`
 - `cdp drag manager ".piece" ".slot"`
 - `cdp gesture manager "canvas" "0.1,0.5 0.9,0.5"` (draw, swipe, slide, trace)
+- `cdp key manager "Ctrl+s"`
 - `cdp type manager ".input" "hello"`
 - `cdp scroll manager 800 --element ".scroll-pane"`
 - `cdp upload manager "input[type=file]" ./file.txt`

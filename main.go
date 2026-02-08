@@ -65,6 +65,8 @@ func run() error {
 		return cmdDrag(args)
 	case "gesture":
 		return cmdGesture(args)
+	case "key":
+		return cmdKey(args)
 	case "scroll":
 		return cmdScroll(args)
 	case "type":
@@ -110,6 +112,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--hold DURATION]")
 	fmt.Println("  \t  cdp drag <name> \".from\" \".to\" [--from-index N] [--to-index N] [--delay DURATION]")
 	fmt.Println("  \t  cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\" [--delay DURATION]  (draw, swipe, slide, trace)")
+	fmt.Println("  \t  cdp key <name> KEYS [--element \".selector\"] [--cdp]")
 	fmt.Println("  \t  cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	fmt.Println("  \t  cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX] [--append]")
 	fmt.Println("  \t  cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
@@ -1016,6 +1019,116 @@ func cmdGesture(args []string) error {
 	return nil
 }
 
+func cmdKey(args []string) error {
+	usage := "usage: cdp key <name> KEYS [--element \".selector\"] [--cdp]"
+	fs := newFlagSet("key", usage+"\n\nSend a key press. KEYS is key names joined by + for combos.\n\nExamples:\n  cdp key mgr Enter\n  cdp key mgr Ctrl+c\n  cdp key mgr Ctrl+Shift+s\n  cdp key mgr ArrowDown\n\nKey names: Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, F1-F12, Ctrl, Shift, Alt, Meta, or any character.")
+	element := fs.String("element", "", "Focus this element before sending the key")
+	useCDP := fs.Bool("cdp", false, "Use CDP Input.dispatchKeyEvent instead of JS KeyboardEvent")
+	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 0 {
+		fs.Usage()
+		return errors.New(usage)
+	}
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 2 {
+		return errors.New(usage)
+	}
+	name := pos[0]
+	spec := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
+	}
+
+	keySpec, err := parseKeySpec(spec)
+	if err != nil {
+		return err
+	}
+
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	if *element != "" {
+		expression := fmt.Sprintf(`(() => {
+            const el = document.querySelector(%s);
+            if (!el) { throw new Error("no element matched selector: " + %s); }
+            if (el.scrollIntoView) { el.scrollIntoView({block: "center", inline: "center"}); }
+            if (el.focus) { el.focus(); }
+            return true;
+        })()`, strconv.Quote(*element), strconv.Quote(*element))
+		if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+			return err
+		}
+	}
+
+	if !*useCDP {
+		expression := fmt.Sprintf(`(() => {
+            const opts = {
+              key: %s,
+              code: %s,
+              bubbles: true,
+              ctrlKey: %t,
+              shiftKey: %t,
+              altKey: %t,
+              metaKey: %t
+            };
+            document.dispatchEvent(new KeyboardEvent('keydown', opts));
+            document.dispatchEvent(new KeyboardEvent('keyup', opts));
+            return true;
+        })()`, strconv.Quote(keySpec.key), strconv.Quote(keySpec.code),
+			keySpec.modifiers&2 != 0, keySpec.modifiers&8 != 0, keySpec.modifiers&1 != 0, keySpec.modifiers&4 != 0)
+		if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+			return err
+		}
+		fmt.Printf("Key (js): %s\n", spec)
+		return nil
+	}
+
+	downType := "keyDown"
+	if keySpec.modifiers != 0 || keySpec.text == "" {
+		downType = "rawKeyDown"
+	}
+	downParams := keyDispatchParams(downType, keySpec)
+	upParams := keyDispatchParams("keyUp", keySpec)
+	// Ensure the page is in a valid state to receive input events.
+	if err := handle.client.Call(ctx, "Page.bringToFront", map[string]interface{}{}, nil); err != nil {
+		return err
+	}
+	if handle.session.TargetID != "" {
+		if err := handle.client.Call(ctx, "Target.activateTarget", map[string]interface{}{
+			"targetId": handle.session.TargetID,
+		}, nil); err != nil {
+			return err
+		}
+	}
+
+	if err := handle.client.Call(ctx, "Input.dispatchKeyEvent", downParams, nil); err != nil {
+		return err
+	}
+	if err := handle.client.Call(ctx, "Input.dispatchKeyEvent", upParams, nil); err != nil {
+		return err
+	}
+
+	fmt.Printf("Key: %s\n", spec)
+	return nil
+}
+
 func cmdType(args []string) error {
 	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	appendText := fs.Bool("append", false, "Append text instead of replacing")
@@ -1253,7 +1366,7 @@ func cmdType(args []string) error {
 }
 
 func cmdScroll(args []string) error {
-fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
+	fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	scrollX := fs.Float64("x", 0, "Horizontal scroll delta in pixels (can be negative)")
 	element := fs.String("element", "", "Scroll inside an element matched by selector")
 	emit := fs.Bool("emit", true, "Dispatch scroll events after scrolling")
@@ -1998,6 +2111,179 @@ func formatScrollNumber(value interface{}) string {
 		s = strings.TrimSuffix(s, ".")
 	}
 	return s
+}
+
+type keySpec struct {
+	key       string
+	code      string
+	text      string
+	keyCode   int
+	modifiers int
+}
+
+func keyDispatchParams(eventType string, spec keySpec) map[string]interface{} {
+	params := map[string]interface{}{
+		"type":      eventType,
+		"modifiers": spec.modifiers,
+		"key":       spec.key,
+	}
+	if spec.code != "" {
+		params["code"] = spec.code
+	}
+	if spec.keyCode > 0 {
+		params["windowsVirtualKeyCode"] = spec.keyCode
+		params["nativeVirtualKeyCode"] = spec.keyCode
+	}
+	// Only include text for unmodified keyDown events.
+	if eventType == "keyDown" && spec.text != "" && spec.modifiers == 0 {
+		params["text"] = spec.text
+		params["unmodifiedText"] = spec.text
+	}
+	return params
+}
+
+func parseKeySpec(spec string) (keySpec, error) {
+	if strings.TrimSpace(spec) == "" {
+		return keySpec{}, errors.New("keys spec cannot be empty")
+	}
+
+	const (
+		modAlt   = 1
+		modCtrl  = 2
+		modMeta  = 4
+		modShift = 8
+	)
+
+	modifierMap := map[string]int{
+		"alt":     modAlt,
+		"ctrl":    modCtrl,
+		"control": modCtrl,
+		"meta":    modMeta,
+		"cmd":     modMeta,
+		"command": modMeta,
+		"win":     modMeta,
+		"windows": modMeta,
+		"shift":   modShift,
+	}
+
+	namedKeys := map[string]keySpec{
+		"enter":      {key: "Enter", code: "Enter", keyCode: 13},
+		"escape":     {key: "Escape", code: "Escape", keyCode: 27},
+		"esc":        {key: "Escape", code: "Escape", keyCode: 27},
+		"tab":        {key: "Tab", code: "Tab", keyCode: 9},
+		"backspace":  {key: "Backspace", code: "Backspace", keyCode: 8},
+		"delete":     {key: "Delete", code: "Delete", keyCode: 46},
+		"del":        {key: "Delete", code: "Delete", keyCode: 46},
+		"space":      {key: " ", code: "Space", keyCode: 32, text: " "},
+		"spacebar":   {key: " ", code: "Space", keyCode: 32, text: " "},
+		"arrowup":    {key: "ArrowUp", code: "ArrowUp", keyCode: 38},
+		"arrowdown":  {key: "ArrowDown", code: "ArrowDown", keyCode: 40},
+		"arrowleft":  {key: "ArrowLeft", code: "ArrowLeft", keyCode: 37},
+		"arrowright": {key: "ArrowRight", code: "ArrowRight", keyCode: 39},
+		"home":       {key: "Home", code: "Home", keyCode: 36},
+		"end":        {key: "End", code: "End", keyCode: 35},
+		"pageup":     {key: "PageUp", code: "PageUp", keyCode: 33},
+		"pagedown":   {key: "PageDown", code: "PageDown", keyCode: 34},
+		"pgup":       {key: "PageUp", code: "PageUp", keyCode: 33},
+		"pgdn":       {key: "PageDown", code: "PageDown", keyCode: 34},
+	}
+
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("f%d", i)
+		namedKeys[name] = keySpec{key: strings.ToUpper(name), code: strings.ToUpper(name), keyCode: 111 + i}
+	}
+
+	tokens := strings.Split(spec, "+")
+	modifiers := 0
+	var modifierTokens []string
+	keyToken := ""
+	for _, t := range tokens {
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return keySpec{}, errors.New("invalid empty key token")
+		}
+		lower := strings.ToLower(s)
+		if mod, ok := modifierMap[lower]; ok {
+			modifiers |= mod
+			modifierTokens = append(modifierTokens, lower)
+			continue
+		}
+		if keyToken != "" {
+			return keySpec{}, errors.New("only one non-modifier key is supported")
+		}
+		keyToken = s
+	}
+
+	if keyToken == "" {
+		if len(modifierTokens) != 1 {
+			return keySpec{}, errors.New("spec must include a non-modifier key (or a single modifier)")
+		}
+		keyToken = modifierTokens[0]
+	}
+
+	lowerKey := strings.ToLower(keyToken)
+	if mod, ok := modifierMap[lowerKey]; ok {
+		modifiers |= mod
+		switch mod {
+		case modCtrl:
+			return keySpec{key: "Control", code: "ControlLeft", keyCode: 17, modifiers: modifiers}, nil
+		case modShift:
+			return keySpec{key: "Shift", code: "ShiftLeft", keyCode: 16, modifiers: modifiers}, nil
+		case modAlt:
+			return keySpec{key: "Alt", code: "AltLeft", keyCode: 18, modifiers: modifiers}, nil
+		case modMeta:
+			return keySpec{key: "Meta", code: "MetaLeft", keyCode: 91, modifiers: modifiers}, nil
+		}
+	}
+
+	if named, ok := namedKeys[lowerKey]; ok {
+		named.modifiers = modifiers
+		if named.text != "" && (modifiers&(modCtrl|modAlt|modMeta)) != 0 {
+			named.text = ""
+		}
+		return named, nil
+	}
+
+	runes := []rune(keyToken)
+	if len(runes) != 1 {
+		return keySpec{}, fmt.Errorf("unknown key %q", keyToken)
+	}
+	r := runes[0]
+	if unicode.IsLetter(r) && unicode.IsUpper(r) && (modifiers&modShift) == 0 {
+		modifiers |= modShift
+	}
+	key := string(r)
+	code := ""
+	keyCode := 0
+
+	upper := unicode.ToUpper(r)
+	if upper >= 'A' && upper <= 'Z' {
+		code = fmt.Sprintf("Key%c", upper)
+		keyCode = int(upper)
+		if (modifiers & modShift) != 0 {
+			key = string(upper)
+		} else {
+			key = strings.ToLower(string(upper))
+		}
+	} else if r >= '0' && r <= '9' {
+		code = fmt.Sprintf("Digit%c", r)
+		keyCode = int(r)
+	} else if r <= 0x7f {
+		keyCode = int(r)
+	}
+
+	text := key
+	if (modifiers & (modCtrl | modAlt | modMeta)) != 0 {
+		text = ""
+	}
+
+	return keySpec{
+		key:       key,
+		code:      code,
+		text:      text,
+		keyCode:   keyCode,
+		modifiers: modifiers,
+	}, nil
 }
 
 func parseInlineHasText(selector string) (string, string, bool, error) {
