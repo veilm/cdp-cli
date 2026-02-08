@@ -62,8 +62,8 @@ func run() error {
 		return cmdHover(args)
 	case "drag":
 		return cmdDrag(args)
-	case "draw":
-		return cmdDraw(args)
+	case "gesture":
+		return cmdGesture(args)
 	case "scroll":
 		return cmdScroll(args)
 	case "type":
@@ -108,7 +108,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
 	fmt.Println("  \t  cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--hold DURATION]")
 	fmt.Println("  \t  cdp drag <name> \".from\" \".to\" [--from-index N] [--to-index N] [--delay DURATION]")
-	fmt.Println("  \t  cdp draw <name> \".selector\" [--strokes N] [--delay DURATION]")
+	fmt.Println("  \t  cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\" [--delay DURATION]  (draw, swipe, slide, trace)")
 	fmt.Println("  \t  cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
 	fmt.Println("  \t  cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX] [--append]")
 	fmt.Println("  \t  cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
@@ -850,14 +850,14 @@ func cmdDrag(args []string) error {
 	return nil
 }
 
-func cmdDraw(args []string) error {
-	fs := newFlagSet("draw", "usage: cdp draw <name> \".selector\"")
-	strokes := fs.Int("strokes", 3, "Number of strokes to draw")
-	delay := fs.Duration("delay", 80*time.Millisecond, "Delay between pointer events")
+func cmdGesture(args []string) error {
+	usage := "usage: cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\"  (draw, swipe, slide, trace)"
+	fs := newFlagSet("gesture", usage+"\n\nPress-move-release along a path within an element.\nCoordinates are relative (0-1) to the element's bounding box.\n\nExamples:\n  cdp gesture mgr \"canvas\" \"0.1,0.5 0.9,0.5\"        # horizontal stroke\n  cdp gesture mgr \".slider\" \"0.0,0.5 1.0,0.5\"        # slide fully right\n  cdp gesture mgr \".pad\" \"0.2,0.2 0.8,0.2 0.8,0.8\"   # L-shaped path")
+	delay := fs.Duration("delay", 50*time.Millisecond, "Delay between pointer events")
 	timeout := fs.Duration("timeout", 12*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp draw <name> \".selector\"")
+		return errors.New(usage)
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -867,17 +867,46 @@ func cmdDraw(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp draw <name> \".selector\"")
+	if len(pos) < 3 {
+		return errors.New(usage)
 	}
 	name := pos[0]
 	selector := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	pathStr := pos[2]
+	if len(pos) > 3 {
+		return fmt.Errorf("unexpected argument: %s", pos[3])
 	}
-	if *strokes <= 0 {
-		return errors.New("--strokes must be >= 1")
+
+	// Parse path: "x1,y1 x2,y2 ..." where each coord is 0-1 relative to element bounds.
+	parts := strings.Fields(pathStr)
+	if len(parts) < 2 {
+		return errors.New("path must have at least 2 points (e.g. \"0.1,0.5 0.9,0.5\")")
 	}
+	type point struct{ x, y float64 }
+	points := make([]point, 0, len(parts))
+	for _, p := range parts {
+		xy := strings.SplitN(p, ",", 2)
+		if len(xy) != 2 {
+			return fmt.Errorf("invalid point %q (expected x,y)", p)
+		}
+		x, errX := strconv.ParseFloat(xy[0], 64)
+		y, errY := strconv.ParseFloat(xy[1], 64)
+		if errX != nil || errY != nil {
+			return fmt.Errorf("invalid point %q (expected numeric x,y)", p)
+		}
+		points = append(points, point{x, y})
+	}
+
+	// Serialize points as JSON array for the JS expression.
+	var pointsJSON strings.Builder
+	pointsJSON.WriteByte('[')
+	for i, pt := range points {
+		if i > 0 {
+			pointsJSON.WriteByte(',')
+		}
+		fmt.Fprintf(&pointsJSON, "[%g,%g]", pt.x, pt.y)
+	}
+	pointsJSON.WriteByte(']')
 
 	st, err := store.Load()
 	if err != nil {
@@ -895,7 +924,7 @@ func cmdDraw(args []string) error {
 	delayMS := delay.Milliseconds()
 	expression := fmt.Sprintf(`(async () => {
         const selector = %s;
-        const strokes = %d;
+        const points = %s;
         const delayMs = %d;
 
         function sleep(ms) {
@@ -914,12 +943,10 @@ func cmdDraw(args []string) error {
         }
 
         const rect = el.getBoundingClientRect();
-        const padX = Math.max(4, rect.width * 0.1);
-        const padY = Math.max(4, rect.height * 0.1);
-        const startX = rect.left + padX;
-        const endX = rect.right - padX;
-        const usableH = Math.max(1, rect.height - padY * 2);
-        const stepY = usableH / Math.max(1, strokes);
+
+        function toAbs(rx, ry) {
+            return { x: rect.left + rx * rect.width, y: rect.top + ry * rect.height };
+        }
 
         function dispatchPointer(type, x, y, isDown) {
             if (typeof PointerEvent !== "undefined") {
@@ -946,27 +973,29 @@ func cmdDraw(args []string) error {
             }));
         }
 
-        for (let i = 0; i < strokes; i++) {
-            const y = rect.top + padY + stepY * i + stepY * 0.5;
-            const sx = startX;
-            const ex = endX;
-            dispatchPointer("pointerdown", sx, y, true);
-            dispatchMouse("mousedown", sx, y, true);
+        const first = toAbs(points[0][0], points[0][1]);
+        dispatchPointer("pointerdown", first.x, first.y, true);
+        dispatchMouse("mousedown", first.x, first.y, true);
+
+        for (let i = 1; i < points.length; i++) {
             await sleep(delayMs);
-            dispatchPointer("pointermove", ex, y, true);
-            dispatchMouse("mousemove", ex, y, true);
-            await sleep(delayMs);
-            dispatchPointer("pointerup", ex, y, false);
-            dispatchMouse("mouseup", ex, y, false);
-            await sleep(delayMs);
+            const pt = toAbs(points[i][0], points[i][1]);
+            dispatchPointer("pointermove", pt.x, pt.y, true);
+            dispatchMouse("mousemove", pt.x, pt.y, true);
         }
-        return {strokes};
-    })()`, strconv.Quote(selector), *strokes, delayMS)
+
+        const last = toAbs(points[points.length - 1][0], points[points.length - 1][1]);
+        await sleep(delayMs);
+        dispatchPointer("pointerup", last.x, last.y, false);
+        dispatchMouse("mouseup", last.x, last.y, false);
+
+        return { points: points.length };
+    })()`, strconv.Quote(selector), pointsJSON.String(), delayMS)
 
 	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
 	}
-	fmt.Printf("Drew %d stroke(s) on: %s\n", *strokes, selector)
+	fmt.Printf("Gesture (%d points) on: %s\n", len(points), selector)
 	return nil
 }
 
