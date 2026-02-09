@@ -515,6 +515,8 @@ func cmdClick(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
+	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
+	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
 	st, err := store.Load()
 	if err != nil {
@@ -599,7 +601,7 @@ func cmdClick(args []string) error {
         const inForm = !!(el.closest && el.closest("form"));
         el.click();
         return { submitForm: isSubmit && inForm };
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -651,6 +653,8 @@ func cmdHover(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
+	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
+	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
 	st, err := store.Load()
 	if err != nil {
@@ -740,7 +744,7 @@ func cmdHover(args []string) error {
         dispatchMouse("mouseover");
         dispatchMouse("mousemove");
         return {x, y};
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
 
 	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
@@ -1186,6 +1190,8 @@ func cmdType(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
+	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
+	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
 	st, err := store.Load()
 	if err != nil {
@@ -1301,7 +1307,7 @@ func cmdType(args []string) error {
             return { found: true, editable: true, contentEditable: true, handled: false };
         }
         return { found: true, editable: false, contentEditable: false, handled: false };
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue), strconv.Quote(text), *appendText)
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -1379,7 +1385,7 @@ func cmdType(args []string) error {
         }
         el.textContent = append ? el.textContent + %s : %s;
         return true;
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue), *appendText, strconv.Quote(text), strconv.Quote(text))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *appendText, strconv.Quote(text), strconv.Quote(text))
 	if _, err := handle.client.Evaluate(ctx, fallback); err != nil {
 		return err
 	}
@@ -2425,6 +2431,34 @@ func fixAttrBlock(block string) string {
 	return attr + "=\"" + val + "\""
 }
 
+func escapeLeadingPlusRegexSpec(spec string) string {
+	if spec == "" {
+		return spec
+	}
+	if strings.HasPrefix(spec, "/") {
+		last := strings.LastIndex(spec, "/")
+		if last > 0 {
+			pattern := spec[1:last]
+			flags := spec[last+1:]
+			if strings.HasPrefix(pattern, "\\+") {
+				return spec
+			}
+			if strings.HasPrefix(pattern, "+") {
+				pattern = "\\+" + pattern[1:]
+				return "/" + pattern + "/" + flags
+			}
+			return spec
+		}
+	}
+	if strings.HasPrefix(spec, "\\+") {
+		return spec
+	}
+	if strings.HasPrefix(spec, "+") {
+		return "\\+" + spec[1:]
+	}
+	return spec
+}
+
 func expandPath(path string) (string, error) {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -2469,7 +2503,8 @@ func cmdLog(args []string) error {
 
 	var levelFilter *regexp.Regexp
 	if *levelFlag != "" {
-		levelFilter, err = regexp.Compile(*levelFlag)
+		levelSpec := escapeLeadingPlusRegexSpec(*levelFlag)
+		levelFilter, err = regexp.Compile(levelSpec)
 		if err != nil {
 			return fmt.Errorf("invalid --level regex: %w", err)
 		}
@@ -2845,24 +2880,28 @@ func buildNetworkFilters(urlPattern, methodPattern, statusPattern, mimePattern s
 	var filters networkFilters
 	var err error
 	if urlPattern != "" {
+		urlPattern = escapeLeadingPlusRegexSpec(urlPattern)
 		filters.url, err = regexp.Compile(urlPattern)
 		if err != nil {
 			return filters, fmt.Errorf("invalid --url regex: %w", err)
 		}
 	}
 	if methodPattern != "" {
+		methodPattern = escapeLeadingPlusRegexSpec(methodPattern)
 		filters.method, err = regexp.Compile(methodPattern)
 		if err != nil {
 			return filters, fmt.Errorf("invalid --method regex: %w", err)
 		}
 	}
 	if statusPattern != "" {
+		statusPattern = escapeLeadingPlusRegexSpec(statusPattern)
 		filters.status, err = regexp.Compile(statusPattern)
 		if err != nil {
 			return filters, fmt.Errorf("invalid --status regex: %w", err)
 		}
 	}
 	if mimePattern != "" {
+		mimePattern = escapeLeadingPlusRegexSpec(mimePattern)
 		filters.mime, err = regexp.Compile(mimePattern)
 		if err != nil {
 			return filters, fmt.Errorf("invalid --mime regex: %w", err)
