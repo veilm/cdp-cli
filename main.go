@@ -108,7 +108,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp eval <name> \"JS expression\" [--pretty] [--depth N] [--json] [--wait]")
 	fmt.Println("  \t  cdp wait <name> [--selector \".selector\"] [--visible]")
 	fmt.Println("  \t  cdp wait-visible <name> \".selector\"")
-	fmt.Println("  \t  cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--submit-wait-ms N]")
+	fmt.Println("  \t  cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	fmt.Println("  \t  cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--hold DURATION]")
 	fmt.Println("  \t  cdp drag <name> \".from\" \".to\" [--from-index N] [--to-index N] [--delay DURATION]")
 	fmt.Println("  \t  cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\" [--delay DURATION]  (draw, swipe, slide, trace)")
@@ -481,14 +481,15 @@ func cmdWaitVisible(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	count := fs.Int("count", 1, "Number of clicks to perform")
 	submitWaitMS := fs.Int("submit-wait-ms", 700, "If clicking a submit button inside a form, wait N ms before returning (0 disables)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -499,7 +500,7 @@ func cmdClick(args []string) error {
 		return err
 	}
 	if len(pos) < 2 {
-		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	name := pos[0]
 	selector := pos[1]
@@ -509,6 +510,9 @@ func cmdClick(args []string) error {
 	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
 	if err != nil {
 		return err
+	}
+	if *count < 1 {
+		return errors.New("--count must be >= 1")
 	}
 	selector = autoQuoteAttrValues(selector)
 	hasTextValue := *hasText
@@ -599,9 +603,12 @@ func cmdClick(args []string) error {
             isSubmit = String(t || "").toLowerCase() === "submit";
         }
         const inForm = !!(el.closest && el.closest("form"));
-        el.click();
+        const clicks = %d;
+        for (let i = 0; i < clicks; i++) {
+            el.click();
+        }
         return { submitForm: isSubmit && inForm };
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
+    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *count)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -614,7 +621,11 @@ func cmdClick(args []string) error {
 			}
 		}
 	}
-	fmt.Printf("Clicked: %s\n", selector)
+	if *count == 1 {
+		fmt.Printf("Clicked: %s\n", selector)
+	} else {
+		fmt.Printf("Clicked: %s (x%d)\n", selector, *count)
+	}
 	return nil
 }
 
