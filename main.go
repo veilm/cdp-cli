@@ -509,6 +509,7 @@ func cmdClick(args []string) error {
 	if err != nil {
 		return err
 	}
+	selector = autoQuoteAttrValues(selector)
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -626,6 +627,7 @@ func cmdHover(args []string) error {
 	if err != nil {
 		return err
 	}
+	selector = autoQuoteAttrValues(selector)
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -1160,6 +1162,7 @@ func cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
+	selector = autoQuoteAttrValues(selector)
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -2336,6 +2339,71 @@ func parseInlineHasText(selector string) (string, string, bool, error) {
 
 	base := strings.TrimRightFunc(trimmed[:start], unicode.IsSpace)
 	return base, content, true, nil
+}
+
+func autoQuoteAttrValues(selector string) string {
+	// Best-effort: if an attribute selector uses an unquoted value with spaces,
+	// wrap it in double quotes (e.g. [placeholder=Enter 6-char code]).
+	var out strings.Builder
+	out.Grow(len(selector))
+	for i := 0; i < len(selector); i++ {
+		ch := selector[i]
+		if ch != '[' {
+			out.WriteByte(ch)
+			continue
+		}
+		// Copy '[' and scan until matching ']'.
+		start := i
+		end := -1
+		for j := i + 1; j < len(selector); j++ {
+			if selector[j] == ']' {
+				end = j
+				break
+			}
+		}
+		if end == -1 {
+			out.WriteString(selector[start:])
+			break
+		}
+		block := selector[start+1 : end]
+		fixed := fixAttrBlock(block)
+		out.WriteByte('[')
+		out.WriteString(fixed)
+		out.WriteByte(']')
+		i = end
+	}
+	return out.String()
+}
+
+func fixAttrBlock(block string) string {
+	// Only handle simple [attr=value] (no operators like ~=|=^=$=*=).
+	ops := []string{"~=", "|=", "^=", "$=", "*="}
+	for _, op := range ops {
+		if strings.Contains(block, op) {
+			return block
+		}
+	}
+	eq := strings.IndexByte(block, '=')
+	if eq == -1 {
+		return block
+	}
+	attr := strings.TrimSpace(block[:eq])
+	val := strings.TrimSpace(block[eq+1:])
+	if attr == "" || val == "" {
+		return block
+	}
+	// Already quoted?
+	if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+		return block
+	}
+	// Only auto-quote when spaces exist and no quotes inside.
+	if !strings.ContainsAny(val, " \t") {
+		return block
+	}
+	if strings.ContainsAny(val, `"'`) {
+		return block
+	}
+	return attr + "=\"" + val + "\""
 }
 
 func expandPath(path string) (string, error) {
