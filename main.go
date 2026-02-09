@@ -108,7 +108,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp eval <name> \"JS expression\" [--pretty] [--depth N] [--json] [--wait]")
 	fmt.Println("  \t  cdp wait <name> [--selector \".selector\"] [--visible]")
 	fmt.Println("  \t  cdp wait-visible <name> \".selector\"")
-	fmt.Println("  \t  cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+	fmt.Println("  \t  cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--submit-wait-ms N]")
 	fmt.Println("  \t  cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--hold DURATION]")
 	fmt.Println("  \t  cdp drag <name> \".from\" \".to\" [--from-index N] [--to-index N] [--delay DURATION]")
 	fmt.Println("  \t  cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\" [--delay DURATION]  (draw, swipe, slide, trace)")
@@ -481,9 +481,10 @@ func cmdWaitVisible(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	submitWaitMS := fs.Int("submit-wait-ms", 700, "If clicking a submit button inside a form, wait N ms before returning (0 disables)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
@@ -586,12 +587,30 @@ func cmdClick(args []string) error {
         if (el.focus) {
             el.focus();
         }
+        const tag = el.tagName ? el.tagName.toLowerCase() : "";
+        let isSubmit = false;
+        if (tag === "button") {
+            const t = el.getAttribute("type");
+            isSubmit = !t || String(t).toLowerCase() === "submit";
+        } else if (tag === "input") {
+            const t = el.getAttribute("type") || el.type;
+            isSubmit = String(t || "").toLowerCase() === "submit";
+        }
+        const inForm = !!(el.closest && el.closest("form"));
         el.click();
-        return true;
+        return { submitForm: isSubmit && inForm };
     })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(*attValue))
 
-	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+	value, err := handle.client.Evaluate(ctx, expression)
+	if err != nil {
 		return err
+	}
+	if *submitWaitMS > 0 {
+		if m, ok := value.(map[string]interface{}); ok {
+			if submit, _ := m["submitForm"].(bool); submit {
+				time.Sleep(time.Duration(*submitWaitMS) * time.Millisecond)
+			}
+		}
 	}
 	fmt.Printf("Clicked: %s\n", selector)
 	return nil
