@@ -1,0 +1,478 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/veilm/cdp-cli/internal/cdp"
+)
+
+const webNavScript = `(function(){
+  const VERSION = "1";
+  if (window.WebNavInjected && window.WebNavVersion === VERSION) { return; }
+
+  function compileRegex(spec) {
+    if (!spec) return null;
+    if (spec.length >= 2 && spec[0] === "/") {
+      const last = spec.lastIndexOf("/");
+      if (last > 0) {
+        const pattern = spec.slice(1, last);
+        const flags = spec.slice(last + 1);
+        try { return new RegExp(pattern, flags); } catch (e) {}
+      }
+    }
+    try { return new RegExp(spec); } catch (e) {
+      throw new Error("invalid regex: " + spec + " (" + (e && e.message ? e.message : e) + ")");
+    }
+  }
+
+  function elementText(el) {
+    return (el && (el.innerText || el.textContent)) || "";
+  }
+
+  function attrValueMatches(el, re) {
+    const attrs = (el && el.attributes) || null;
+    if (!attrs) return false;
+    for (let i = 0; i < attrs.length; i++) {
+      const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
+      if (re.test(v)) return true;
+    }
+    return false;
+  }
+
+  function normalizeSelectors(input) {
+    if (!input) return [];
+    if (typeof input === "string") return [input];
+    if (Array.isArray(input)) return input;
+    return [];
+  }
+
+  function resolveElement(input, hasTextSpec, attValueSpec) {
+    if (input && input.nodeType === 1) {
+      return { el: input, selector: "" };
+    }
+
+    const selectors = normalizeSelectors(input);
+    const hasTextRe = compileRegex(hasTextSpec);
+    const attValueRe = compileRegex(attValueSpec);
+
+    let el = null;
+    let usedSelector = "";
+    for (let s = 0; s < selectors.length && !el; s++) {
+      const selector = selectors[s];
+      const list = Array.from(document.querySelectorAll(selector));
+      for (let i = 0; i < list.length; i++) {
+        const cand = list[i];
+        if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+        if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+        el = cand;
+        usedSelector = selector;
+        break;
+      }
+    }
+    return { el, selector: usedSelector };
+  }
+
+  function focusElement(el) {
+    if (!el) return;
+    if (el.scrollIntoView) {
+      el.scrollIntoView({block: "center", inline: "center"});
+    }
+    if (el.focus) {
+      el.focus();
+    }
+  }
+
+  const WebNav = {};
+
+  WebNav.focus = function(target) {
+    const resolved = resolveElement(target, "", "");
+    if (!resolved.el) throw new Error("no element matched selector");
+    focusElement(resolved.el);
+    return true;
+  };
+
+  WebNav.click = function(target, hasTextSpec, attValueSpec, count) {
+    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+    if (!resolved.el) {
+      const selectors = normalizeSelectors(target);
+      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+    }
+    const el = resolved.el;
+    focusElement(el);
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    let isSubmit = false;
+    if (tag === "button") {
+      const t = el.getAttribute("type");
+      isSubmit = !t || String(t).toLowerCase() === "submit";
+    } else if (tag === "input") {
+      const t = el.getAttribute("type") || el.type;
+      isSubmit = String(t || "").toLowerCase() === "submit";
+    }
+    const inForm = !!(el.closest && el.closest("form"));
+    const clicks = count && count > 0 ? count : 1;
+    for (let i = 0; i < clicks; i++) {
+      el.click();
+    }
+    return { submitForm: isSubmit && inForm, selector: resolved.selector };
+  };
+
+  WebNav.hover = function(target, hasTextSpec, attValueSpec) {
+    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+    if (!resolved.el) {
+      const selectors = normalizeSelectors(target);
+      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+    }
+    const el = resolved.el;
+    focusElement(el);
+
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    function dispatchMouse(type) {
+      const evt = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons: 0,
+      });
+      el.dispatchEvent(evt);
+    }
+
+    if (typeof PointerEvent !== "undefined") {
+      const pe = (type) => new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, pointerType: "mouse"});
+      el.dispatchEvent(pe("pointerenter"));
+      el.dispatchEvent(pe("pointerover"));
+      el.dispatchEvent(pe("pointermove"));
+    }
+
+    dispatchMouse("mouseenter");
+    dispatchMouse("mouseover");
+    dispatchMouse("mousemove");
+    return { x, y, selector: resolved.selector };
+  };
+
+  WebNav.drag = async function(fromTarget, toTarget, fromIndex, toIndex, delayMs) {
+    function sleep(ms) {
+      if (!ms || ms <= 0) return Promise.resolve();
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function pick(target, index) {
+      if (target && target.nodeType === 1) return { el: target, list: [target] };
+      if (typeof target !== "string") return { el: null, list: [] };
+      const list = Array.from(document.querySelectorAll(target));
+      if (!list.length) return { el: null, list };
+      const idx = Math.min(Math.max(index || 0, 0), list.length - 1);
+      return { el: list[idx], list };
+    }
+
+    const fromPick = pick(fromTarget, fromIndex);
+    const toPick = pick(toTarget, toIndex);
+    if (!fromPick.el) throw new Error("no element matched selector: " + fromTarget);
+    if (!toPick.el) throw new Error("no element matched selector: " + toTarget);
+
+    const fromEl = fromPick.el;
+    const toEl = toPick.el;
+
+    const fromRect = fromEl.getBoundingClientRect();
+    const toRect = toEl.getBoundingClientRect();
+    const fromPt = {x: fromRect.left + Math.max(2, Math.min(fromRect.width - 2, fromRect.width / 2)),
+                    y: fromRect.top + Math.max(2, Math.min(fromRect.height - 2, fromRect.height / 2))};
+    const toPt = {x: toRect.left + Math.max(2, Math.min(toRect.width - 2, toRect.width / 2)),
+                  y: toRect.top + Math.max(2, Math.min(toRect.height - 2, toRect.height / 2))};
+
+    let dataTransfer = null;
+    if (typeof DataTransfer !== "undefined") {
+      dataTransfer = new DataTransfer();
+    } else {
+      dataTransfer = {
+        data: {},
+        setData(type, val) { this.data[type] = String(val); },
+        getData(type) { return this.data[type] || ""; },
+        clearData(type) { if (type) delete this.data[type]; else this.data = {}; },
+        effectAllowed: "all",
+        dropEffect: "move",
+        types: [],
+      };
+    }
+
+    function dispatchMouse(el, type, pt) {
+      const evt = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: pt.x,
+        clientY: pt.y,
+        button: 0,
+        buttons: type === "mouseup" ? 0 : 1,
+      });
+      el.dispatchEvent(evt);
+    }
+
+    function dispatchDrag(el, type, pt) {
+      const evt = new DragEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: pt.x,
+        clientY: pt.y,
+        dataTransfer,
+      });
+      el.dispatchEvent(evt);
+    }
+
+    if (fromEl.scrollIntoView) fromEl.scrollIntoView({block: "center", inline: "center"});
+    if (toEl.scrollIntoView) toEl.scrollIntoView({block: "center", inline: "center"});
+
+    dispatchMouse(fromEl, "mousedown", fromPt);
+    dispatchDrag(fromEl, "dragstart", fromPt);
+    await sleep(delayMs);
+    dispatchDrag(toEl, "dragenter", toPt);
+    dispatchDrag(toEl, "dragover", toPt);
+    await sleep(delayMs);
+    dispatchDrag(toEl, "drop", toPt);
+    dispatchDrag(fromEl, "dragend", toPt);
+    dispatchMouse(toEl, "mouseup", toPt);
+    return {fromIndex: fromIndex || 0, toIndex: toIndex || 0, fromCount: fromPick.list.length, toCount: toPick.list.length};
+  };
+
+  WebNav.gesture = async function(target, points, delayMs) {
+    function sleep(ms) {
+      if (!ms || ms <= 0) return Promise.resolve();
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    const resolved = resolveElement(target, "", "");
+    if (!resolved.el) throw new Error("no element matched selector: " + target);
+    const el = resolved.el;
+    focusElement(el);
+
+    const rect = el.getBoundingClientRect();
+    function toAbs(rx, ry) {
+      return { x: rect.left + rx * rect.width, y: rect.top + ry * rect.height };
+    }
+
+    function dispatchPointer(type, x, y, isDown) {
+      if (typeof PointerEvent !== "undefined") {
+        el.dispatchEvent(new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+          pointerType: "mouse",
+          button: 0,
+          buttons: isDown ? 1 : 0,
+        }));
+      }
+    }
+
+    function dispatchMouse(type, x, y, isDown) {
+      el.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons: isDown ? 1 : 0,
+      }));
+    }
+
+    const first = toAbs(points[0][0], points[0][1]);
+    dispatchPointer("pointerdown", first.x, first.y, true);
+    dispatchMouse("mousedown", first.x, first.y, true);
+
+    for (let i = 1; i < points.length; i++) {
+      await sleep(delayMs);
+      const pt = toAbs(points[i][0], points[i][1]);
+      dispatchPointer("pointermove", pt.x, pt.y, true);
+      dispatchMouse("mousemove", pt.x, pt.y, true);
+    }
+
+    const last = toAbs(points[points.length - 1][0], points[points.length - 1][1]);
+    await sleep(delayMs);
+    dispatchPointer("pointerup", last.x, last.y, false);
+    dispatchMouse("mouseup", last.x, last.y, false);
+
+    return { points: points.length };
+  };
+
+  WebNav.key = function(opts) {
+    const params = {
+      key: opts && opts.key ? opts.key : "",
+      code: opts && opts.code ? opts.code : "",
+      bubbles: true,
+      ctrlKey: !!(opts && opts.ctrlKey),
+      shiftKey: !!(opts && opts.shiftKey),
+      altKey: !!(opts && opts.altKey),
+      metaKey: !!(opts && opts.metaKey),
+    };
+    document.dispatchEvent(new KeyboardEvent("keydown", params));
+    document.dispatchEvent(new KeyboardEvent("keyup", params));
+    return true;
+  };
+
+  WebNav.typePrepare = function(target, hasTextSpec, attValueSpec, inputText, append) {
+    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+    if (!resolved.el) {
+      const selectors = normalizeSelectors(target);
+      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+    }
+    const el = resolved.el;
+    focusElement(el);
+
+    const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    const isTextInput = tag === "input" || tag === "textarea";
+    if (isTextInput) {
+      const inputType = (el.getAttribute && el.getAttribute("type") ? el.getAttribute("type") : el.type) || "";
+      const normalizedType = inputType ? String(inputType).toLowerCase() : "";
+      const useNativeValue = tag === "input" && normalizedType === "number";
+      if (useNativeValue) {
+        const next = append ? String(el.value || "") + String(inputText) : String(inputText);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        if (setter) {
+          setter.call(el, next);
+        } else {
+          el.value = next;
+        }
+        try {
+          el.dispatchEvent(new Event("input", {bubbles: true}));
+          el.dispatchEvent(new Event("change", {bubbles: true}));
+        } catch (e) {}
+        return { found: true, editable: true, contentEditable: false, handled: true, selector: resolved.selector };
+      }
+      if (!append) {
+        el.value = "";
+      }
+      if (el.setSelectionRange) {
+        try {
+          const end = el.value.length;
+          el.setSelectionRange(end, end);
+        } catch (e) {}
+      }
+      return { found: true, editable: true, contentEditable: false, handled: false, selector: resolved.selector };
+    }
+    if (el.isContentEditable) {
+      if (!append) {
+        el.textContent = "";
+      }
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return { found: true, editable: true, contentEditable: true, handled: false, selector: resolved.selector };
+    }
+    return { found: true, editable: false, contentEditable: false, handled: false, selector: resolved.selector };
+  };
+
+  WebNav.typeFallback = function(target, hasTextSpec, attValueSpec, inputText, append) {
+    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+    if (!resolved.el) return { ok: false };
+    const el = resolved.el;
+    if (!append) {
+      el.textContent = "";
+    }
+    el.textContent = append ? el.textContent + String(inputText) : String(inputText);
+    return { ok: true, selector: resolved.selector };
+  };
+
+  WebNav.scroll = function(yPx, xPx, elementTarget, emit) {
+    const SCROLL_Y_PX = yPx || 0;
+    const SCROLL_X_PX = xPx || 0;
+    const EMIT = emit !== false;
+    let el = null;
+    if (elementTarget && elementTarget.nodeType === 1) {
+      el = elementTarget;
+    } else if (typeof elementTarget === "string" && elementTarget !== "") {
+      el = document.querySelector(elementTarget);
+      if (!el) {
+        throw new Error("no element matched selector: " + elementTarget);
+      }
+    } else {
+      el = document.scrollingElement || document.documentElement;
+    }
+
+    if (elementTarget && (typeof elementTarget === "string" || elementTarget.nodeType === 1)) {
+      try {
+        el.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
+      } catch (e) {
+        try {
+          el.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+        } catch (e2) {
+          el.scrollTop = (el.scrollTop || 0) + SCROLL_Y_PX;
+          el.scrollLeft = (el.scrollLeft || 0) + SCROLL_X_PX;
+        }
+      }
+    } else {
+      try {
+        window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "instant" });
+      } catch (e) {
+        window.scrollBy({ top: SCROLL_Y_PX, left: SCROLL_X_PX, behavior: "auto" });
+      }
+    }
+
+    if (EMIT) {
+      const evt = new Event("scroll", { bubbles: true });
+      if (elementTarget && (typeof elementTarget === "string" || elementTarget.nodeType === 1)) {
+        el.dispatchEvent(evt);
+      } else {
+        window.dispatchEvent(evt);
+        document.dispatchEvent(evt);
+      }
+    }
+
+    return { scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
+  };
+
+  window.WebNav = WebNav;
+  window.WebNavClick = WebNav.click;
+  window.WebNavHover = WebNav.hover;
+  window.WebNavDrag = WebNav.drag;
+  window.WebNavGesture = WebNav.gesture;
+  window.WebNavKey = WebNav.key;
+  window.WebNavTypePrepare = WebNav.typePrepare;
+  window.WebNavTypeFallback = WebNav.typeFallback;
+  window.WebNavScroll = WebNav.scroll;
+  window.WebNavFocus = WebNav.focus;
+  window.WebNavInjected = true;
+  window.WebNavVersion = VERSION;
+})();`
+
+func ensureWebNavInjected(ctx context.Context, client *cdp.Client) error {
+	ok, err := isWebNavInjected(ctx, client)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return injectWebNav(ctx, client, true)
+}
+
+func isWebNavInjected(ctx context.Context, client *cdp.Client) (bool, error) {
+	value, err := client.Evaluate(ctx, `(() => !!window.WebNavInjected)()`)
+	if err != nil {
+		return false, err
+	}
+	ok, _ := value.(bool)
+	return ok, nil
+}
+
+func injectWebNav(ctx context.Context, client *cdp.Client, force bool) error {
+	if !force {
+		ok, err := isWebNavInjected(ctx, client)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+	}
+	if _, err := client.Evaluate(ctx, webNavScript); err != nil {
+		return fmt.Errorf("webnav inject failed: %w", err)
+	}
+	return nil
+}

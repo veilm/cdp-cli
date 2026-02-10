@@ -36,6 +36,41 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 - Set `CDP_PORT=9310` (or whatever you need) to change the default DevTools port used by commands that talk to the browser.
 
+## WebNav Helpers (Injected JS API)
+
+Most UI automation commands (`click`, `hover`, `drag`, `gesture`, `key`, `type`, `scroll`) now call a small helper API injected into the page. This lets you reuse the same logic from your own `cdp eval` scripts without copy-pasting long snippets.
+
+- Auto-injection: the first time you run one of those commands, the helpers are injected automatically.
+- Manual injection: `cdp inject <name>` (use `--force` to re-inject).
+
+### Helper Surface
+
+The injection defines a global object and convenience aliases:
+
+- `window.WebNav` (namespace)
+- `window.WebNavClick`, `window.WebNavHover`, `window.WebNavDrag`, `window.WebNavGesture`, `window.WebNavKey`, `window.WebNavTypePrepare`, `window.WebNavTypeFallback`, `window.WebNavScroll`, `window.WebNavFocus`
+
+Each helper accepts either an `HTMLElement` or a CSS selector string (or string array for `click`/`hover`/`type`).
+
+### Examples
+
+```
+cdp eval manager "window.WebNavClick('#save-button')"
+cdp eval manager "window.WebNavClick(window.myElement)"
+cdp eval manager "window.WebNavTypePrepare('#title', '', '', 'Hello', false)"
+cdp eval manager "window.WebNavScroll(200, 0, '#scroll-pane', true)"
+```
+
+Notes:
+- `WebNavClick(target, hasTextSpec, attValueSpec, count)` returns `{submitForm, selector}`.
+- `WebNavHover(target, hasTextSpec, attValueSpec)` returns `{x, y, selector}`.
+- `WebNavDrag(fromTarget, toTarget, fromIndex, toIndex, delayMs)` performs a drag/drop.
+- `WebNavGesture(target, points, delayMs)` performs pointer down/move/up along `[[x,y], ...]` relative to the element.
+- `WebNavKey({key, code, ctrlKey, shiftKey, altKey, metaKey})` dispatches keydown/keyup.
+- `WebNavTypePrepare(target, hasTextSpec, attValueSpec, inputText, append)` prepares selection/value and returns a state object. If `handled` is false, you can follow with `Input.insertText` (what `cdp type` does).
+- `WebNavTypeFallback(target, hasTextSpec, attValueSpec, inputText, append)` is a last-resort textContent setter.
+- `WebNavScroll(yPx, xPx, elementTarget, emit)` scrolls window or element and returns `{scrollTop, scrollLeft}`.
+
 ## other similar projects
 - `https://github.com/myers/cdp-cli`: looks pretty good judging from the README.
 would probably be fine for my use case tbh but I just personally prefer only
