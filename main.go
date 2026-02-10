@@ -397,6 +397,11 @@ func cmdWait(args []string) error {
 	if *visible && *selector == "" {
 		return errors.New("--visible requires --selector")
 	}
+	if *selector != "" {
+		if err := rejectUnsupportedSelector(*selector, "wait --selector", false); err != nil {
+			return err
+		}
+	}
 	if len(pos) > 1 {
 		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
@@ -459,6 +464,18 @@ func cmdWaitVisible(args []string) error {
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
+	if err := rejectUnsupportedSelector(selector, "rect", false); err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(selector, "styles", false); err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(selector, "dom", false); err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(selector, "wait-visible", false); err != nil {
+		return err
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -509,6 +526,9 @@ func cmdClick(args []string) error {
 	}
 	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
 	if err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(selector, "click", true); err != nil {
 		return err
 	}
 	if *count < 1 {
@@ -659,6 +679,9 @@ func cmdHover(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectUnsupportedSelector(selector, "hover", true); err != nil {
+		return err
+	}
 	selector = autoQuoteAttrValues(selector)
 	hasTextValue := *hasText
 	if hasInline {
@@ -793,6 +816,12 @@ func cmdDrag(args []string) error {
 	toSelector := pos[2]
 	if len(pos) > 3 {
 		return fmt.Errorf("unexpected argument: %s", pos[3])
+	}
+	if err := rejectUnsupportedSelector(fromSelector, "drag --from", false); err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(toSelector, "drag --to", false); err != nil {
+		return err
 	}
 	if *fromIndex < 0 || *toIndex < 0 {
 		return errors.New("indices must be >= 0")
@@ -931,6 +960,9 @@ func cmdGesture(args []string) error {
 	pathStr := pos[2]
 	if len(pos) > 3 {
 		return fmt.Errorf("unexpected argument: %s", pos[3])
+	}
+	if err := rejectUnsupportedSelector(selector, "gesture", false); err != nil {
+		return err
 	}
 
 	// Parse path: "x1,y1 x2,y2 ..." where each coord is 0-1 relative to element bounds.
@@ -1081,6 +1113,11 @@ func cmdKey(args []string) error {
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
+	if *element != "" {
+		if err := rejectUnsupportedSelector(*element, "key --element", false); err != nil {
+			return err
+		}
+	}
 
 	keySpec, err := parseKeySpec(spec)
 	if err != nil {
@@ -1194,6 +1231,9 @@ func cmdType(args []string) error {
 	}
 	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
 	if err != nil {
+		return err
+	}
+	if err := rejectUnsupportedSelector(selector, "type", true); err != nil {
 		return err
 	}
 	selector = autoQuoteAttrValues(selector)
@@ -1430,6 +1470,11 @@ func cmdScroll(args []string) error {
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
+	if *element != "" {
+		if err := rejectUnsupportedSelector(*element, "scroll --element", false); err != nil {
+			return err
+		}
+	}
 
 	scrollY, err := strconv.ParseFloat(yStr, 64)
 	if err != nil {
@@ -1533,6 +1578,9 @@ func cmdUpload(args []string) error {
 	name := pos[0]
 	selector := pos[1]
 	filesRaw := pos[2:]
+	if err := rejectUnsupportedSelector(selector, "upload", false); err != nil {
+		return err
+	}
 
 	files := make([]string, 0, len(filesRaw))
 	for _, f := range filesRaw {
@@ -1848,6 +1896,11 @@ func cmdScreenshot(args []string) error {
 	name := pos[0]
 	if len(pos) > 1 {
 		return fmt.Errorf("unexpected argument: %s", pos[1])
+	}
+	if *selector != "" {
+		if err := rejectUnsupportedSelector(*selector, "screenshot --selector", false); err != nil {
+			return err
+		}
 	}
 
 	st, err := store.Load()
@@ -2440,6 +2493,16 @@ func fixAttrBlock(block string) string {
 		return block
 	}
 	return attr + "=\"" + val + "\""
+}
+
+func rejectUnsupportedSelector(selector, context string, allowHasTextLiteral bool) error {
+	if strings.Contains(selector, ":has-text(") || strings.Contains(selector, "has-text(") {
+		if allowHasTextLiteral {
+			return nil
+		}
+		return fmt.Errorf("%s: selector uses :has-text(...), which is only supported inline at the end for click/type/hover; use --has-text there or a different selector", context)
+	}
+	return nil
 }
 
 func escapeLeadingPlusRegexSpec(spec string) string {
