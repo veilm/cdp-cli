@@ -12,33 +12,38 @@ import (
 )
 
 func cmdDOM(args []string) error {
-	fs := newFlagSet("dom", "usage: cdp dom <name> \".selector\"")
+	fs := newFlagSet("dom", "usage: cdp dom --session <name> \".selector\"")
+	sessionFlag := addSessionFlag(fs)
 	pretty := fs.Bool("pretty", true, "Pretty print output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	switch len(args) {
 	case 0:
 		fs.Usage()
-		return errors.New("usage: cdp dom <name> \".selector\"")
+		return errors.New("usage: cdp dom --session <name> \".selector\"")
 	case 1:
 		if isHelpArg(args[0]) {
 			fs.Usage()
 			return nil
 		}
-		return errors.New("usage: cdp dom <name> \".selector\"")
+		return errors.New("usage: cdp dom --session <name> \".selector\"")
 	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp dom <name> \".selector\"")
+	if len(pos) < 1 {
+		return errors.New("missing selector")
 	}
-	name := pos[0]
-	selector := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	selector := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if err := rejectUnsupportedSelector(selector, "dom", false); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
 		return err
 	}
 
@@ -81,32 +86,37 @@ func cmdDOM(args []string) error {
 }
 
 func cmdStyles(args []string) error {
-	fs := newFlagSet("styles", "usage: cdp styles <name> \".selector\"")
+	fs := newFlagSet("styles", "usage: cdp styles --session <name> \".selector\"")
+	sessionFlag := addSessionFlag(fs)
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	switch len(args) {
 	case 0:
 		fs.Usage()
-		return errors.New("usage: cdp styles <name> \".selector\"")
+		return errors.New("usage: cdp styles --session <name> \".selector\"")
 	case 1:
 		if isHelpArg(args[0]) {
 			fs.Usage()
 			return nil
 		}
-		return errors.New("usage: cdp styles <name> \".selector\"")
+		return errors.New("usage: cdp styles --session <name> \".selector\"")
 	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp styles <name> \".selector\"")
+	if len(pos) < 1 {
+		return errors.New("missing selector")
 	}
-	name := pos[0]
-	selector := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	selector := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if err := rejectUnsupportedSelector(selector, "styles", false); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
 		return err
 	}
 
@@ -164,32 +174,37 @@ func cmdStyles(args []string) error {
 }
 
 func cmdRect(args []string) error {
-	fs := newFlagSet("rect", "usage: cdp rect <name> \".selector\"")
+	fs := newFlagSet("rect", "usage: cdp rect --session <name> \".selector\"")
+	sessionFlag := addSessionFlag(fs)
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	switch len(args) {
 	case 0:
 		fs.Usage()
-		return errors.New("usage: cdp rect <name> \".selector\"")
+		return errors.New("usage: cdp rect --session <name> \".selector\"")
 	case 1:
 		if isHelpArg(args[0]) {
 			fs.Usage()
 			return nil
 		}
-		return errors.New("usage: cdp rect <name> \".selector\"")
+		return errors.New("usage: cdp rect --session <name> \".selector\"")
 	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp rect <name> \".selector\"")
+	if len(pos) < 1 {
+		return errors.New("missing selector")
 	}
-	name := pos[0]
-	selector := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	selector := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if err := rejectUnsupportedSelector(selector, "rect", false); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
 		return err
 	}
 

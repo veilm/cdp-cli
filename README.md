@@ -10,29 +10,29 @@ cdp --help
 
 Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highlights:
 
-- `cdp eval manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
-- `cdp eval manager --json --wait "({ready: document.readyState})"` can wait for load and JSON-serialize values.
+- `cdp eval --session manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
+- `cdp eval --session manager --json --wait "({ready: document.readyState})"` can wait for load and JSON-serialize values.
 - Tip: if your JS starts with an object literal, wrap it like `({a: 1})` so it isn't parsed as a block.
 - Tip: `click`, `type`, and `hover` also accept inline `:has-text(...)` at the end of the selector (e.g. `.btn:has-text(Submit)`), which maps to `--has-text`.
-- `cdp rect manager ".selector"` prints a DOMRect snapshot.
+- `cdp rect --session manager ".selector"` prints a DOMRect snapshot.
 - `cdp tabs list --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
-- `cdp connect manager --tab 3 --port 9222` binds a session by tab index or pattern.
-- `cdp connect manager --new --port 9222` opens a new tab and connects it immediately.
+- `cdp connect --session manager --tab 3 --port 9222` binds a session by tab index or pattern.
+- `cdp connect --session manager --new --port 9222` opens a new tab and connects it immediately.
 - `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
-- `cdp wait manager --selector ".compose"` and `cdp wait-visible manager ".compose"` pause until the page is ready.
+- `cdp wait --session manager --selector ".compose"` and `cdp wait-visible --session manager ".compose"` pause until the page is ready.
 - Basic UI automation examples:
-- `cdp click manager ".btn"`
-- `cdp hover manager ".card"`
-- `cdp drag manager ".piece" ".slot"`
-- `cdp gesture manager "canvas" "0.1,0.5 0.9,0.5"` (draw, swipe, slide, trace)
-- `cdp key manager "Ctrl+s"`
-- `cdp type manager ".input" "hello"`
-- `cdp scroll manager 800 --element ".scroll-pane"`
-- `cdp upload manager "input[type=file]" ./file.txt`
+- `cdp click --session manager ".btn"`
+- `cdp hover --session manager ".card"`
+- `cdp drag --session manager ".piece" ".slot"`
+- `cdp gesture --session manager "canvas" "0.1,0.5 0.9,0.5"` (draw, swipe, slide, trace)
+- `cdp key --session manager "Ctrl+s"`
+- `cdp type --session manager ".input" "hello"`
+- `cdp scroll --session manager 800 --element ".scroll-pane"`
+- `cdp upload --session manager "input[type=file]" ./file.txt`
 - `cdp upload` supports multiple files and can `--wait` for the selector to exist (with `--poll` and `--timeout`).
-- `cdp network-log manager --dir /tmp/network --url '.*\\.json'` mirrors every Fetch response into timestamped folders so you can `tail -F` or `jq` through the saved request/response artifacts without extra tooling.
-- `cdp keep-alive manager` toggles focus/lifecycle emulation and foregrounds the tab so throttled UI pieces start rendering again.
+- `cdp network-log --session manager --dir /tmp/network --url '.*\\.json'` mirrors every Fetch response into timestamped folders so you can `tail -F` or `jq` through the saved request/response artifacts without extra tooling.
+- `cdp keep-alive --session manager` toggles focus/lifecycle emulation and foregrounds the tab so throttled UI pieces start rendering again.
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 - Set `CDP_PORT=9310` (or whatever you need) to change the default DevTools port used by commands that talk to the browser.
 
@@ -41,7 +41,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 Most UI automation commands (`click`, `hover`, `drag`, `gesture`, `key`, `type`, `scroll`) now call a small helper API injected into the page. This lets you reuse the same logic from your own `cdp eval` scripts without copy-pasting long snippets.
 
 - Auto-injection: the first time you run one of those commands, the helpers are injected automatically.
-- Manual injection: `cdp inject <name>` (use `--force` to re-inject).
+- Manual injection: `cdp inject --session <name>` (use `--force` to re-inject).
 
 ### Helper Surface
 
@@ -55,10 +55,10 @@ Each helper accepts either an `HTMLElement` or a CSS selector string (or string 
 ### Examples
 
 ```
-cdp eval manager "window.WebNavClick('#save-button')"
-cdp eval manager "window.WebNavClick(window.myElement)"
-cdp eval manager "window.WebNavTypePrepare('#title', '', '', 'Hello', false)"
-cdp eval manager "window.WebNavScroll(200, 0, '#scroll-pane', true)"
+cdp eval --session manager "window.WebNavClick('#save-button')"
+cdp eval --session manager "window.WebNavClick(window.myElement)"
+cdp eval --session manager "window.WebNavTypePrepare('#title', '', '', 'Hello', false)"
+cdp eval --session manager "window.WebNavScroll(200, 0, '#scroll-pane', true)"
 ```
 
 Notes:
@@ -76,5 +76,5 @@ Notes:
 Example:
 
 ```
-cdp eval manager "WebNavClick(document.querySelectorAll('button').hasText('Press me'))"
+cdp eval --session manager "WebNavClick(document.querySelectorAll('button').hasText('Press me'))"
 ```

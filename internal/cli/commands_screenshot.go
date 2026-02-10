@@ -18,17 +18,14 @@ import (
 )
 
 func cmdScreenshot(args []string) error {
-	fs := newFlagSet("screenshot", "usage: cdp screenshot <name> [--selector ...]")
+	fs := newFlagSet("screenshot", "usage: cdp screenshot --session <name> [--selector ...]")
+	sessionFlag := addSessionFlag(fs)
 	selector := fs.String("selector", "", "CSS selector to crop")
 	output := fs.String("output", "screenshot.png", "Output file path")
 	fullPage := fs.Bool("full-page", false, "Capture beyond the current viewport (may cause resize/reflow in headful Chrome)")
 	cdpClip := fs.Bool("cdp-clip", false, "When using --selector, crop via CDP clip (may resize/reflow); default is capture viewport then crop locally")
 	scrollIntoView := fs.Bool("scroll-into-view", true, "When using --selector (without --cdp-clip), scroll the element into view before capture")
 	timeout := fs.Duration("timeout", 15*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp screenshot <name> [--selector ...]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -37,12 +34,13 @@ func cmdScreenshot(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp screenshot <name> [--selector ...]")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
 	if *selector != "" {
 		if err := rejectUnsupportedSelector(*selector, "screenshot --selector", false); err != nil {

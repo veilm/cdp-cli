@@ -13,14 +13,11 @@ import (
 )
 
 func cmdUpload(args []string) error {
-	fs := newFlagSet("upload", "usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	fs := newFlagSet("upload", "usage: cdp upload --session <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	sessionFlag := addSessionFlag(fs)
 	waitFlag := fs.Bool("wait", false, "Wait for the selector to exist before uploading")
 	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval when using --wait")
 	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -29,13 +26,17 @@ func cmdUpload(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 3 {
-		return errors.New("usage: cdp upload <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
+	if len(pos) < 2 {
+		return errors.New("missing selector and files")
 	}
-	name := pos[0]
-	selector := pos[1]
-	filesRaw := pos[2:]
+	selector := pos[0]
+	filesRaw := pos[1:]
 	if err := rejectUnsupportedSelector(selector, "upload", false); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
 		return err
 	}
 

@@ -11,7 +11,8 @@ import (
 )
 
 func cmdConnect(args []string) error {
-	fs := newFlagSet("connect", "usage: cdp connect <name> --port --url\nor:    cdp connect <name> --port --tab <index|id|pattern>\nor:    cdp connect <name> --port --new [--new-url <url>]")
+	fs := newFlagSet("connect", "usage: cdp connect --session <name> --port --url\nor:    cdp connect --session <name> --port --tab <index|id|pattern>\nor:    cdp connect --session <name> --port --new [--new-url <url>]")
+	sessionFlag := addSessionFlag(fs)
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(0), "DevTools port")
 	targetURL := fs.String("url", "", "Tab URL to bind to")
@@ -20,10 +21,6 @@ func cmdConnect(args []string) error {
 	newURL := fs.String("new-url", "about:blank", "URL to open when using --new")
 	activate := fs.Bool("activate", true, "Activate the tab after opening (with --new)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp connect <name> --port --url (or --tab)")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -32,12 +29,13 @@ func cmdConnect(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) == 0 {
-		return errors.New("usage: cdp connect <name> --port --url (or --tab)")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
 	if *port == 0 {
 		return errors.New("--port is required")
@@ -134,12 +132,9 @@ func cmdConnect(args []string) error {
 }
 
 func cmdKeepAlive(args []string) error {
-	fs := newFlagSet("keep-alive", "usage: cdp keep-alive <name>")
+	fs := newFlagSet("keep-alive", "usage: cdp keep-alive --session <name>")
+	sessionFlag := addSessionFlag(fs)
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp keep-alive <name>")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -148,12 +143,13 @@ func cmdKeepAlive(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp keep-alive <name>")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
 
 	st, err := store.Load()
@@ -188,16 +184,24 @@ func cmdKeepAlive(args []string) error {
 }
 
 func cmdDisconnect(args []string) error {
-	fs := newFlagSet("disconnect", "usage: cdp disconnect <name>")
+	fs := newFlagSet("disconnect", "usage: cdp disconnect --session <name>")
+	sessionFlag := addSessionFlag(fs)
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
 	}
-	fs.Parse(args)
-	if fs.NArg() != 1 {
-		return errors.New("usage: cdp disconnect <name>")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
 	}
-	name := fs.Arg(0)
+	if err := unexpectedArgs(pos); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 
 	st, err := store.Load()
 	if err != nil {

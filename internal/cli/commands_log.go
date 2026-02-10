@@ -23,7 +23,8 @@ import (
 )
 
 func cmdLog(args []string) error {
-	fs := newFlagSet("log", "usage: cdp log <name> [\"setup script\"] [options]")
+	fs := newFlagSet("log", "usage: cdp log --session <name> [\"setup script\"] [options]")
+	sessionFlag := addSessionFlag(fs)
 	limitFlag := fs.Int("limit", 0, "Maximum log entries to collect (<=0 for unlimited)")
 	timeoutFlag := fs.Duration("timeout", 0, "Maximum time to wait for log events (0 disables)")
 	levelFlag := fs.String("level", "", "Regex to filter by level/type (e.g. 'error|warning|exception')")
@@ -35,17 +36,17 @@ func cmdLog(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
 		fs.Usage()
-		return errors.New("usage: cdp log <name> [\"setup script\"] [options]")
+		return err
 	}
-	name := pos[0]
 	script := ""
-	if len(pos) > 1 {
-		script = pos[1]
+	if len(pos) > 0 {
+		script = pos[0]
 	}
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	limit := *limitFlag
 	timeout := *timeoutFlag
@@ -283,16 +284,13 @@ func handleLogEvent(ctx context.Context, client *cdp.Client, evt cdp.Event, leve
 }
 
 func cmdNetworkLog(args []string) error {
-	fs := newFlagSet("network-log", "usage: cdp network-log <name> [options]")
+	fs := newFlagSet("network-log", "usage: cdp network-log --session <name> [options]")
+	sessionFlag := addSessionFlag(fs)
 	dirFlag := fs.String("dir", "", "Directory for captured requests (default ./cdp-<name>-network-log)")
 	urlPattern := fs.String("url", "", "Regex to match request URLs")
 	methodPattern := fs.String("method", "", "Regex to match HTTP methods")
 	statusPattern := fs.String("status", "", "Regex to match HTTP status codes")
 	mimePattern := fs.String("mime", "", "Regex to match response Content-Type values")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp network-log <name> [options]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -301,12 +299,13 @@ func cmdNetworkLog(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp network-log <name> [options]")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
 
 	filters, err := buildNetworkFilters(*urlPattern, *methodPattern, *statusPattern, *mimePattern)

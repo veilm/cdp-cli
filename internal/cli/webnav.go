@@ -661,6 +661,449 @@ const webNavScript = `(function(){
     return { scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
   };
 
+  WebNav.read = async function(opts) {
+    opts = opts || {};
+    function sleep(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
+
+    var waitMs = Number(opts.waitMs || 0);
+    var rootSelector = (opts.rootSelector === undefined || opts.rootSelector === null || opts.rootSelector === "") ? null : String(opts.rootSelector);
+    var hasTextRaw = (opts.hasText === undefined || opts.hasText === null) ? "" : String(opts.hasText);
+    var hasValueRaw = (opts.attValue === undefined || opts.attValue === null) ? "" : String(opts.attValue);
+    var classLimit = Number(opts.classLimit || 3);
+    if (waitMs > 0) await sleep(waitMs);
+
+    function normalize(s) { return String(s || "").replace(/\\s+/g, " ").trim(); }
+
+    function formatHref(href) {
+      try {
+        var u = new URL(href, location.href);
+        if (u.origin === location.origin) {
+          return u.pathname + u.search + u.hash;
+        }
+        return u.href;
+      } catch (e) {
+        return href || "";
+      }
+    }
+
+    function isVisible(_el) { return true; }
+
+    var inlineTextTags = new Set(["h1","h2","h3","h4","h5","h6","p","li","label","button","span","strong","em","small","blockquote","figcaption","dt","dd"]);
+    var containerTags = new Set(["div","main","header","nav","section","article","aside","footer","ul","ol","figure","form","fieldset"]);
+    var ignoredTags = new Set(["script","style","noscript"]);
+
+    var lines = [];
+    function emit(level, line) {
+      var text = normalize(line || "");
+      if (!text) return;
+      lines.push(Array(level + 1).join("\\t") + text);
+    }
+    function emitRawLine(level, line) {
+      var text = String(line || "").replace(/\\s+$/, "");
+      if (!text) return;
+      lines.push(Array(level + 1).join("\\t") + text);
+    }
+
+    function imgInline(el) {
+      var src = el.getAttribute("src") || "";
+      var alt = el.getAttribute("alt") || el.getAttribute("aria-label") || "";
+      var parts = [];
+      if (src) parts.push("src=" + formatHref(src));
+      if (alt) parts.push("alt=" + JSON.stringify(alt));
+      return ("img " + parts.join(" ")).trim();
+    }
+
+    function inlineContent(node) {
+      if (!node) return "";
+      if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+      if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+      var tag = node.tagName.toLowerCase();
+      if (ignoredTags.has(tag)) return "";
+
+      if (tag === "a") {
+        var t = normalize(Array.from(node.childNodes).map(inlineContent).join(""));
+        var href = node.getAttribute("href") || node.href || "";
+        if (!t) return "";
+        if (href) return "<a href=" + formatHref(href) + ">" + t + "</a>";
+        return t;
+      }
+
+      if (tag === "img") {
+        return imgInline(node);
+      }
+
+      return Array.from(node.childNodes).map(inlineContent).join("");
+    }
+
+    function hasDataAttrs(el) {
+      var names = el.getAttributeNames();
+      for (var i = 0; i < names.length; i++) {
+        if (names[i].indexOf("data-") === 0) return true;
+      }
+      return false;
+    }
+
+    function shouldFlattenDiv(el) {
+      if (el.tagName.toLowerCase() !== "div") return false;
+      var id = el.getAttribute("id");
+      var role = el.getAttribute("role");
+      var aria = el.getAttribute("aria-label");
+      var cls = el.getAttribute("class");
+      if (id || role || aria || cls) return false;
+      if (hasDataAttrs(el)) return false;
+      return true;
+    }
+
+    function containerLabel(el) {
+      var tag = el.tagName.toLowerCase();
+      var id = el.getAttribute("id");
+      var cls = (el.getAttribute("class") || "").trim();
+      var role = el.getAttribute("role");
+      var dataRole = el.getAttribute("data-role");
+      var draggableAttr = el.getAttribute("draggable");
+
+      var parts = [tag];
+      if (id) parts.push("#" + id);
+      if (cls) {
+        var clsShort = cls.split(/\\s+/).slice(0, classLimit).join(".");
+        parts.push("." + clsShort);
+      }
+      if (role) parts.push("[role=" + role + "]");
+      if (dataRole) parts.push("[data-role=" + dataRole + "]");
+      if (draggableAttr !== null && draggableAttr !== "auto") {
+        var val = draggableAttr === "" ? "true" : draggableAttr;
+        parts.push("[draggable=" + val + "]");
+      }
+      return parts.join("");
+    }
+
+    function buildRegex(value) {
+      if (!value) return null;
+      if (value[0] === "/" && value.lastIndexOf("/") > 0) {
+        var last = value.lastIndexOf("/");
+        var pattern = value.slice(1, last);
+        var flags = value.slice(last + 1);
+        try { return new RegExp(pattern, flags); } catch (e) { return new RegExp(value); }
+      }
+      var escaped = value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+      return new RegExp(escaped);
+    }
+
+    var hasTextRegex = buildRegex(hasTextRaw);
+    var hasValueRegex = buildRegex(hasValueRaw);
+    var includeSet = null;
+    var matchInfo = null;
+    var displaySelector = rootSelector ? rootSelector.replace(/\\\\\\//g, "/") : "";
+    var noMatchLine = rootSelector ? ("no matches in the DOM for " + displaySelector) : "no-matches";
+
+    function isSimpleClassSelector(sel) {
+      if (!sel) return false;
+      if (/[\\s>#\\[:]/.test(sel)) return false;
+      if (sel.indexOf(".") === -1) return false;
+      return true;
+    }
+
+    function escapeSelectorSlashes(sel) { return sel.replace(/\\//g, "\\\\/"); }
+
+    function suggestFallbackSelector(sel) {
+      if (!isSimpleClassSelector(sel)) return null;
+      var parts = sel.split(".");
+      var tag = parts[0] || "";
+      var classes = parts.slice(1).filter(Boolean);
+      if (classes.length === 0) return null;
+      var attempts = 0;
+      var currentClasses = classes.slice();
+      while (attempts < 2 && currentClasses.length > 1) {
+        currentClasses = currentClasses.slice(0, -1);
+        var candidateDisplay = (tag ? tag : "") + "." + currentClasses.join(".");
+        var candidate = escapeSelectorSlashes(candidateDisplay);
+        var matches = Array.from(document.querySelectorAll(candidate));
+        if (matches.length > 0) {
+          return { selector: candidateDisplay, matches: matches };
+        }
+        attempts += 1;
+      }
+      return null;
+    }
+
+    function shouldSerializeElement(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+      var tag = el.tagName.toLowerCase();
+      if (ignoredTags.has(tag)) return false;
+      if (el.classList && el.classList.contains("web-nav-hidden")) return false;
+      if (tag !== "body" && !isVisible(el)) return false;
+      if (includeSet && !includeSet.has(el)) return false;
+      return true;
+    }
+
+    function buildIncludeSet(root) {
+      if (!hasTextRegex && !hasValueRegex) { includeSet = null; matchInfo = null; return true; }
+      var set = new Set();
+      var matches = [];
+      var info = new Map();
+      var all = [root].concat(Array.from(root.querySelectorAll("*")));
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!isVisible(el)) continue;
+        var matched = false;
+        var text = (el.textContent || "").trim();
+        if (hasTextRegex && text && hasTextRegex.test(text)) {
+          matches.push(el);
+          info.set(el, { kind: "text" });
+          matched = true;
+        }
+        if (!matched && hasValueRegex) {
+          var names = el.getAttributeNames();
+          for (var j = 0; j < names.length; j++) {
+            var name = names[j];
+            var val = el.getAttribute(name) || "";
+            if (val && hasValueRegex.test(val)) {
+              matches.push(el);
+              info.set(el, { kind: "attr", name: name });
+              matched = true;
+              break;
+            }
+          }
+        }
+      }
+      if (matches.length === 0) {
+        includeSet = null;
+        matchInfo = null;
+        return false;
+      }
+      for (var k = 0; k < matches.length; k++) {
+        var cur = matches[k];
+        while (cur && cur !== root) {
+          set.add(cur);
+          cur = cur.parentElement;
+        }
+      }
+      set.add(root);
+      includeSet = set;
+      matchInfo = info;
+      return true;
+    }
+
+    function emitPre(el, level) {
+      var raw = String(el.textContent || "").replace(/\\r\\n?/g, "\\n");
+      var parts = raw.split("\\n");
+      if (parts.length <= 1) {
+        var one = normalize(raw);
+        if (one) emit(level, "pre: " + one);
+        return;
+      }
+      emit(level, "pre:");
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] === "") continue;
+        emitRawLine(level + 1, parts[i]);
+      }
+    }
+
+    function serialize(el, level) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
+      var tag = el.tagName.toLowerCase();
+      if (!shouldSerializeElement(el)) return;
+
+      if (tag === "body") {
+        var kids = Array.from(el.children);
+        for (var i = 0; i < kids.length; i++) serialize(kids[i], level);
+        return;
+      }
+
+      if (tag === "hr") { emit(level, "hr"); return; }
+      if (tag === "canvas") { emit(level, "<canvas>"); return; }
+
+      if (tag === "img") {
+        var noteImg = (matchInfo && matchInfo.get(el) && matchInfo.get(el).kind === "attr") ? (" [match attr=" + matchInfo.get(el).name + "]") : "";
+        emit(level, imgInline(el) + noteImg);
+        return;
+      }
+
+      if (tag === "input") {
+        var type = el.getAttribute("type") || "text";
+        var name = el.getAttribute("name") || "";
+        var placeholder = el.getAttribute("placeholder") || "";
+        var value = (el.value !== undefined && el.value !== null) ? String(el.value) : (el.getAttribute("value") || "");
+        var p = ["type=" + type];
+        if (name) p.push("name=" + name);
+        if (placeholder) p.push("placeholder=" + JSON.stringify(placeholder));
+        p.push("value=" + JSON.stringify(value));
+        emit(level, "input: " + p.join(" "));
+        return;
+      }
+
+      if (tag === "textarea") {
+        var name2 = el.getAttribute("name") || "";
+        var placeholder2 = el.getAttribute("placeholder") || "";
+        var value2 = (el.value !== undefined && el.value !== null) ? String(el.value) : (el.textContent || "");
+        var p2 = [];
+        if (name2) p2.push("name=" + name2);
+        if (placeholder2) p2.push("placeholder=" + JSON.stringify(placeholder2));
+        p2.push("value=" + JSON.stringify(value2));
+        emit(level, "textarea: " + p2.join(" "));
+        return;
+      }
+
+      if (tag === "select") {
+        var name3 = el.getAttribute("name") || "";
+        var p3 = [];
+        if (name3) p3.push("name=" + name3);
+        emit(level, ("select: " + p3.join(" ")).trim());
+        var opts2 = Array.from(el.querySelectorAll("option"));
+        for (var i = 0; i < opts2.length; i++) {
+          var opt = opts2[i];
+          var val2 = opt.getAttribute("value") || "";
+          var text2 = normalize(opt.textContent || "");
+          var sel2 = opt.selected ? " selected" : "";
+          var optParts = [];
+          if (val2) optParts.push("value=" + val2);
+          var line = ("option: " + text2 + sel2 + (optParts.length ? (" " + optParts.join(" ")) : "")).trim();
+          emit(level + 1, line);
+        }
+        return;
+      }
+
+      if (tag === "pre") { emitPre(el, level); return; }
+
+      if (tag === "a") {
+        var href = el.getAttribute("href") || el.href || "";
+        var text3 = normalize(Array.from(el.childNodes).map(inlineContent).join(""));
+        var imgs = Array.from(el.querySelectorAll("img"));
+        var noteA = (matchInfo && matchInfo.get(el) && matchInfo.get(el).kind === "attr") ? (" [match attr=" + matchInfo.get(el).name + "]") : "";
+        if (imgs.length && !text3) {
+          var imgText = imgInline(imgs[0]);
+          emit(level, "a href=" + formatHref(href) + ": " + imgText + noteA);
+        } else if (text3) {
+          emit(level, "a href=" + formatHref(href) + ": " + text3 + noteA);
+        } else if (noteA) {
+          emit(level, "a href=" + formatHref(href) + ":" + noteA);
+        }
+        return;
+      }
+
+      if (inlineTextTags.has(tag)) {
+        var content = normalize(Array.from(el.childNodes).map(inlineContent).join(""));
+        var noteT = (matchInfo && matchInfo.get(el) && matchInfo.get(el).kind === "attr") ? (" [match attr=" + matchInfo.get(el).name + "]") : "";
+        if (content) emit(level, tag + ": " + content + noteT);
+        else if (noteT) emit(level, tag + ":" + noteT);
+        return;
+      }
+
+      if (tag === "div" && shouldFlattenDiv(el)) {
+        var kids2 = Array.from(el.children);
+        for (var i = 0; i < kids2.length; i++) serialize(kids2[i], level);
+        return;
+      }
+
+      if (containerTags.has(tag)) {
+        var label = containerLabel(el);
+        var children = Array.from(el.children).filter(function(c){ return c.nodeType === Node.ELEMENT_NODE; });
+        var noteC = (matchInfo && matchInfo.get(el) && matchInfo.get(el).kind === "attr") ? (" [match attr=" + matchInfo.get(el).name + "]") : "";
+        if (children.length === 0) {
+          var content2 = normalize(Array.from(el.childNodes).map(inlineContent).join(""));
+          if (content2) {
+            emit(level, label + ": " + content2 + noteC);
+          } else {
+            emit(level, "<" + label + "></" + tag + ">");
+          }
+          return;
+        }
+        emit(level, label + ":" + noteC);
+        var hiddenCount = 0;
+        for (var i = 0; i < children.length; i++) {
+          var child = children[i];
+          if ((hasTextRegex || hasValueRegex) && includeSet && !includeSet.has(child)) {
+            var childTag = child.tagName ? child.tagName.toLowerCase() : "";
+            if (!ignoredTags.has(childTag)) hiddenCount += 1;
+            continue;
+          }
+          serialize(child, level + 1);
+        }
+        if (hiddenCount > 0) {
+          emit(level + 1, "[" + hiddenCount + " siblings not shown]");
+        }
+        return;
+      }
+
+      var content3 = normalize(Array.from(el.childNodes).map(inlineContent).join(""));
+      if (content3) emit(level, tag + ": " + content3);
+    }
+
+    if (!rootSelector) {
+      emit(0, "title: " + normalize(document.title || "Untitled"));
+      emit(0, "url: " + location.href);
+      emit(0, "");
+    }
+
+    var roots = rootSelector ? Array.from(document.querySelectorAll(rootSelector)) : [document.body];
+    var uniqueRoots = [];
+    for (var i = 0; i < roots.length; i++) {
+      var el = roots[i];
+      var nested = false;
+      for (var j = 0; j < uniqueRoots.length; j++) {
+        if (uniqueRoots[j].contains(el)) { nested = true; break; }
+      }
+      if (!nested) uniqueRoots.push(el);
+    }
+
+    if (uniqueRoots.length === 0) {
+      emit(0, noMatchLine);
+      var suggestion = suggestFallbackSelector(displaySelector);
+      if (suggestion) {
+        if (suggestion.matches.length === 1) {
+          emit(0, "did you mean \"" + suggestion.selector + "\", which has 1 match:");
+          serialize(suggestion.matches[0], 1);
+        } else {
+          emit(0, "did you mean \"" + suggestion.selector + "\", which has " + suggestion.matches.length + " matches");
+          emit(0, "first match:");
+          serialize(suggestion.matches[0], 1);
+        }
+      }
+    } else {
+      var renderedRoots = [];
+      for (var i = 0; i < uniqueRoots.length; i++) {
+        var root = uniqueRoots[i];
+        if (hasTextRegex || hasValueRegex) {
+          var ok = buildIncludeSet(root);
+          if (!ok) continue;
+        } else {
+          includeSet = null;
+          matchInfo = null;
+        }
+        renderedRoots.push(root);
+      }
+
+      if (renderedRoots.length === 0) {
+        emit(0, noMatchLine);
+        var suggestion2 = suggestFallbackSelector(displaySelector);
+        if (suggestion2) {
+          if (suggestion2.matches.length === 1) {
+            emit(0, "did you mean \"" + suggestion2.selector + "\", which has 1 match:");
+            serialize(suggestion2.matches[0], 1);
+          } else {
+            emit(0, "did you mean \"" + suggestion2.selector + "\", which has " + suggestion2.matches.length + " matches");
+            emit(0, "first match:");
+            serialize(suggestion2.matches[0], 1);
+          }
+        }
+      } else if (renderedRoots.length === 1) {
+        serialize(renderedRoots[0], 0);
+      } else {
+        var idx = 1;
+        for (var i = 0; i < renderedRoots.length; i++) {
+          var node = renderedRoots[i];
+          if (hasTextRegex || hasValueRegex) buildIncludeSet(node);
+          emit(0, "match: " + idx);
+          serialize(node, 1);
+          idx += 1;
+        }
+      }
+    }
+
+    return { url: location.href, title: document.title, lines: lines };
+  };
+
   window.WebNav = WebNav;
   window.WebNavClick = WebNav.click;
   window.WebNavHover = WebNav.hover;
@@ -672,6 +1115,7 @@ const webNavScript = `(function(){
   window.WebNavTypeFallback = WebNav.typeFallback;
   window.WebNavScroll = WebNav.scroll;
   window.WebNavFocus = WebNav.focus;
+  window.WebNavRead = WebNav.read;
   window.WebNavInjected = true;
 })();`
 

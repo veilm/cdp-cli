@@ -53,13 +53,10 @@ func buildFilteredTargetExpr(selectors []string, hasText, attValue string) strin
 }
 
 func cmdInject(args []string) error {
-	fs := newFlagSet("inject", "usage: cdp inject <name> [--force]")
+	fs := newFlagSet("inject", "usage: cdp inject --session <name> [--force]")
+	sessionFlag := addSessionFlag(fs)
 	force := fs.Bool("force", false, "Force re-injection even if WebNav is already present")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp inject <name> [--force]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -68,12 +65,13 @@ func cmdInject(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp inject <name> [--force]")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
 
 	st, err := store.Load()
@@ -97,16 +95,13 @@ func cmdInject(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("click", "usage: cdp click --session <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
+	sessionFlag := addSessionFlag(fs)
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	count := fs.Int("count", 1, "Number of clicks to perform")
 	submitWaitMS := fs.Int("submit-wait-ms", 700, "If clicking a submit button inside a form, wait N ms before returning (0 disables)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -115,16 +110,12 @@ func cmdClick(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
-	}
-	name := pos[0]
 	selector := ""
-	if len(pos) >= 2 {
-		selector = pos[1]
+	if len(pos) >= 1 {
+		selector = pos[0]
 	}
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	inlineHasText := ""
 	hasInline := false
@@ -137,7 +128,7 @@ func cmdClick(args []string) error {
 			return err
 		}
 	} else if *hasText == "" {
-		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
+		return errors.New("usage: cdp click --session <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	if *count < 1 {
 		return errors.New("--count must be >= 1")
@@ -160,6 +151,11 @@ func cmdClick(args []string) error {
 	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
 	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -197,6 +193,9 @@ func cmdClick(args []string) error {
 			usedSelector = sel
 		}
 	}
+	if usedSelector == "" && hasTextValue != "" {
+		usedSelector = "(has-text: " + hasTextValue + ")"
+	}
 	if *count == 1 {
 		fmt.Printf("Clicked: %s\n", usedSelector)
 	} else {
@@ -206,15 +205,12 @@ func cmdClick(args []string) error {
 }
 
 func cmdHover(args []string) error {
-	fs := newFlagSet("hover", "usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("hover", "usage: cdp hover --session <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	sessionFlag := addSessionFlag(fs)
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	hold := fs.Duration("hold", 0, "Optional time to wait after hovering")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -223,16 +219,12 @@ func cmdHover(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 1 {
-		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
-	}
-	name := pos[0]
 	selector := ""
-	if len(pos) >= 2 {
-		selector = pos[1]
+	if len(pos) >= 1 {
+		selector = pos[0]
 	}
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	inlineHasText := ""
 	hasInline := false
@@ -245,7 +237,7 @@ func cmdHover(args []string) error {
 			return err
 		}
 	} else if *hasText == "" {
-		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp hover --session <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
 	}
 	selectors := []string{}
 	if selector != "" {
@@ -265,6 +257,11 @@ func cmdHover(args []string) error {
 	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
 	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -303,15 +300,12 @@ func cmdHover(args []string) error {
 }
 
 func cmdDrag(args []string) error {
-	fs := newFlagSet("drag", "usage: cdp drag <name> \".from\" \".to\"")
+	fs := newFlagSet("drag", "usage: cdp drag --session <name> \".from\" \".to\"")
+	sessionFlag := addSessionFlag(fs)
 	fromIndex := fs.Int("from-index", 0, "Index within the source selector (0-based)")
 	toIndex := fs.Int("to-index", 0, "Index within the target selector (0-based)")
 	delay := fs.Duration("delay", 0, "Delay between drag events (e.g. 50ms)")
 	timeout := fs.Duration("timeout", 8*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp drag <name> \".from\" \".to\"")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -320,14 +314,13 @@ func cmdDrag(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 3 {
-		return errors.New("usage: cdp drag <name> \".from\" \".to\"")
+	if len(pos) < 2 {
+		return errors.New("usage: cdp drag --session <name> \".from\" \".to\"")
 	}
-	name := pos[0]
-	fromSelector := pos[1]
-	toSelector := pos[2]
-	if len(pos) > 3 {
-		return fmt.Errorf("unexpected argument: %s", pos[3])
+	fromSelector := pos[0]
+	toSelector := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 	if err := rejectUnsupportedSelector(fromSelector, "drag --from", false); err != nil {
 		return err
@@ -339,6 +332,11 @@ func cmdDrag(args []string) error {
 		return errors.New("indices must be >= 0")
 	}
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -367,14 +365,11 @@ func cmdDrag(args []string) error {
 }
 
 func cmdGesture(args []string) error {
-	usage := "usage: cdp gesture <name> \".selector\" \"x1,y1 x2,y2 ...\"  (draw, swipe, slide, trace)"
+	usage := "usage: cdp gesture --session <name> \".selector\" \"x1,y1 x2,y2 ...\"  (draw, swipe, slide, trace)"
 	fs := newFlagSet("gesture", usage+"\n\nPress-move-release along a path within an element.\nCoordinates are relative (0-1) to the element's bounding box.\n\nExamples:\n  cdp gesture mgr \"canvas\" \"0.1,0.5 0.9,0.5\"        # horizontal stroke\n  cdp gesture mgr \".slider\" \"0.0,0.5 1.0,0.5\"        # slide fully right\n  cdp gesture mgr \".pad\" \"0.2,0.2 0.8,0.2 0.8,0.8\"   # L-shaped path")
+	sessionFlag := addSessionFlag(fs)
 	delay := fs.Duration("delay", 50*time.Millisecond, "Delay between pointer events")
 	timeout := fs.Duration("timeout", 12*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New(usage)
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -383,16 +378,20 @@ func cmdGesture(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 3 {
+	if len(pos) < 2 {
 		return errors.New(usage)
 	}
-	name := pos[0]
-	selector := pos[1]
-	pathStr := pos[2]
-	if len(pos) > 3 {
-		return fmt.Errorf("unexpected argument: %s", pos[3])
+	selector := pos[0]
+	pathStr := pos[1]
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 	if err := rejectUnsupportedSelector(selector, "gesture", false); err != nil {
+		return err
+	}
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
 		return err
 	}
 
@@ -454,15 +453,12 @@ func cmdGesture(args []string) error {
 }
 
 func cmdKey(args []string) error {
-	usage := "usage: cdp key <name> KEYS [--element \".selector\"] [--cdp]"
+	usage := "usage: cdp key --session <name> KEYS [--element \".selector\"] [--cdp]"
 	fs := newFlagSet("key", usage+"\n\nSend a key press. KEYS is key names joined by + for combos.\n\nExamples:\n  cdp key mgr Enter\n  cdp key mgr Ctrl+c\n  cdp key mgr Ctrl+Shift+s\n  cdp key mgr ArrowDown\n\nKey names: Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, F1-F12, Ctrl, Shift, Alt, Meta, or any character.")
+	sessionFlag := addSessionFlag(fs)
 	element := fs.String("element", "", "Focus this element before sending the key")
 	useCDP := fs.Bool("cdp", false, "Use CDP Input.dispatchKeyEvent instead of JS KeyboardEvent")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New(usage)
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -471,13 +467,12 @@ func cmdKey(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
+	if len(pos) < 1 {
 		return errors.New(usage)
 	}
-	name := pos[0]
-	spec := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	spec := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if *element != "" {
 		if err := rejectUnsupportedSelector(*element, "key --element", false); err != nil {
@@ -490,6 +485,11 @@ func cmdKey(args []string) error {
 		return err
 	}
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -552,15 +552,12 @@ func cmdKey(args []string) error {
 }
 
 func cmdType(args []string) error {
-	fs := newFlagSet("type", "usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("type", "usage: cdp type --session <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	sessionFlag := addSessionFlag(fs)
 	appendText := fs.Bool("append", false, "Append text instead of replacing")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -569,23 +566,22 @@ func cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
-	}
-	name := pos[0]
 	selector := ""
 	text := ""
-	if len(pos) == 2 {
+	if len(pos) == 1 {
 		if *hasText == "" {
-			return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
+			return errors.New("usage: cdp type --session <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
 		}
-		text = pos[1]
+		text = pos[0]
 	} else {
-		selector = pos[1]
-		text = pos[2]
+		if len(pos) < 2 {
+			return errors.New("missing text")
+		}
+		selector = pos[0]
+		text = pos[1]
 	}
-	if len(pos) > 3 {
-		return fmt.Errorf("unexpected argument: %s", pos[3])
+	if len(pos) > 2 {
+		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
 	inlineHasText := ""
 	hasInline := false
@@ -616,6 +612,11 @@ func cmdType(args []string) error {
 	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
 	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -681,15 +682,12 @@ func cmdType(args []string) error {
 }
 
 func cmdScroll(args []string) error {
-	fs := newFlagSet("scroll", "usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
+	fs := newFlagSet("scroll", "usage: cdp scroll --session <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
+	sessionFlag := addSessionFlag(fs)
 	scrollX := fs.Float64("x", 0, "Horizontal scroll delta in pixels (can be negative)")
 	element := fs.String("element", "", "Scroll inside an element matched by selector")
 	emit := fs.Bool("emit", true, "Dispatch scroll events after scrolling")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -698,13 +696,12 @@ func cmdScroll(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp scroll <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
+	if len(pos) < 1 {
+		return errors.New("missing yPx")
 	}
-	name := pos[0]
-	yStr := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	yStr := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if *element != "" {
 		if err := rejectUnsupportedSelector(*element, "scroll --element", false); err != nil {
@@ -717,6 +714,11 @@ func cmdScroll(args []string) error {
 		return fmt.Errorf("invalid yPx %q: %w", yStr, err)
 	}
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err

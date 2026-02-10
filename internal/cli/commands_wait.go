@@ -10,15 +10,12 @@ import (
 )
 
 func cmdWait(args []string) error {
-	fs := newFlagSet("wait", "usage: cdp wait <name> [--selector \".selector\"] [--visible]")
+	fs := newFlagSet("wait", "usage: cdp wait --session <name> [--selector \".selector\"] [--visible]")
+	sessionFlag := addSessionFlag(fs)
 	selector := fs.String("selector", "", "CSS selector to wait for")
 	visible := fs.Bool("visible", false, "Wait for selector to be visible (requires --selector)")
 	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval")
 	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp wait <name> [--selector \".selector\"] [--visible]")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -27,10 +24,14 @@ func cmdWait(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) == 0 {
-		return errors.New("usage: cdp wait <name> [--selector \".selector\"] [--visible]")
+	if err := unexpectedArgs(pos); err != nil {
+		return err
 	}
-	name := pos[0]
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	if *visible && *selector == "" {
 		return errors.New("--visible requires --selector")
 	}
@@ -39,10 +40,6 @@ func cmdWait(args []string) error {
 			return err
 		}
 	}
-	if len(pos) > 1 {
-		return fmt.Errorf("unexpected argument: %s", pos[1])
-	}
-
 	st, err := store.Load()
 	if err != nil {
 		return err
@@ -78,13 +75,10 @@ func cmdWait(args []string) error {
 }
 
 func cmdWaitVisible(args []string) error {
-	fs := newFlagSet("wait-visible", "usage: cdp wait-visible <name> \".selector\"")
+	fs := newFlagSet("wait-visible", "usage: cdp wait-visible --session <name> \".selector\"")
+	sessionFlag := addSessionFlag(fs)
 	poll := fs.Duration("poll", 200*time.Millisecond, "Polling interval")
 	timeout := fs.Duration("timeout", 10*time.Second, "Command timeout")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp wait-visible <name> \".selector\"")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -93,13 +87,12 @@ func cmdWaitVisible(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp wait-visible <name> \".selector\"")
+	if len(pos) < 1 {
+		return errors.New("missing selector")
 	}
-	name := pos[0]
-	selector := pos[1]
-	if len(pos) > 2 {
-		return fmt.Errorf("unexpected argument: %s", pos[2])
+	selector := pos[0]
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
 	}
 	if err := rejectUnsupportedSelector(selector, "rect", false); err != nil {
 		return err
@@ -114,6 +107,11 @@ func cmdWaitVisible(args []string) error {
 		return err
 	}
 
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
 	st, err := store.Load()
 	if err != nil {
 		return err

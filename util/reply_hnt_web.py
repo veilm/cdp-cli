@@ -125,6 +125,7 @@ def connect_session(session: str, target_url: str, host: str, port: int) -> None
         [
             "cdp",
             "connect",
+            "--session",
             session,
             "--host",
             host,
@@ -154,7 +155,7 @@ def focus_reply(session: str) -> None:
         })()
         """
     ).strip()
-    run_cdp(["cdp", "eval", session, script])
+    run_cdp(["cdp", "eval", "--session", session, script])
 
 
 def maybe_switch_to_most_recent_fork(session: str) -> Tuple[bool, Optional[str]]:
@@ -214,7 +215,7 @@ def maybe_switch_to_most_recent_fork(session: str) -> Tuple[bool, Optional[str]]
         })()
         """
     ).strip()
-    output = run_cdp(["cdp", "eval", session, script], capture=True).strip()
+    output = run_cdp(["cdp", "eval", "--session", session, script], capture=True).strip()
     try:
         payload = json.loads(output)
     except json.JSONDecodeError as exc:

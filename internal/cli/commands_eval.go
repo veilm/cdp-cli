@@ -14,7 +14,8 @@ import (
 )
 
 func cmdEval(args []string) error {
-	fs := newFlagSet("eval", "usage: cdp eval <name> \"expr\"")
+	fs := newFlagSet("eval", "usage: cdp eval --session <name> \"expr\"")
+	sessionFlag := addSessionFlag(fs)
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	depth := fs.Int("depth", -1, "Max depth before truncating (-1 = unlimited)")
 	jsonOutput := fs.Bool("json", true, "Serialize objects via JSON.stringify when possible")
@@ -23,10 +24,6 @@ func cmdEval(args []string) error {
 	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
 	readStdin := fs.Bool("stdin", false, "Read JS from stdin")
 	body := fs.Bool("body", false, "Treat input as a function body (wrap in an IIFE and return its value)")
-	if len(args) == 0 {
-		fs.Usage()
-		return errors.New("usage: cdp eval <name> \"expr\"")
-	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
 		return nil
@@ -35,10 +32,11 @@ func cmdEval(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) == 0 {
-		return errors.New("usage: cdp eval <name> \"expr\"")
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
 	}
-	name := pos[0]
 
 	filePath := *file
 	useStdin := *readStdin
@@ -56,24 +54,30 @@ func cmdEval(args []string) error {
 	var expression string
 	switch {
 	case filePath != "":
+		if len(pos) > 0 {
+			return fmt.Errorf("unexpected argument: %s", pos[0])
+		}
 		src, err := readScriptFile(filePath)
 		if err != nil {
 			return err
 		}
 		expression = src
 	case useStdin:
+		if len(pos) > 0 {
+			return fmt.Errorf("unexpected argument: %s", pos[0])
+		}
 		src, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
 		}
 		expression = string(src)
 	default:
-		if len(pos) < 2 {
+		if len(pos) < 1 {
 			return errors.New("missing JS expression (pass literal, --file, or --stdin)")
 		}
-		expression = pos[1]
-		if len(pos) > 2 {
-			return fmt.Errorf("unexpected argument: %s", pos[2])
+		expression = pos[0]
+		if len(pos) > 1 {
+			return fmt.Errorf("unexpected argument: %s", pos[1])
 		}
 	}
 	if strings.TrimSpace(expression) == "" {
