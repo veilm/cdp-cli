@@ -12,6 +12,46 @@ import (
 	"github.com/veilm/cdp-cli/internal/store"
 )
 
+// buildFilteredTargetExpr constructs a JS expression for element targeting.
+// When hasText or attValue are specified, it builds a querySelectorAll chain
+// with .hasText()/.hasAttValue() filters. Otherwise returns the selector(s) as-is.
+func buildFilteredTargetExpr(selectors []string, hasText, attValue string) string {
+	if hasText == "" && attValue == "" {
+		if len(selectors) == 1 {
+			return strconv.Quote(selectors[0])
+		}
+		b, _ := json.Marshal(selectors)
+		return string(b)
+	}
+
+	addFilters := func(expr string) string {
+		if hasText != "" {
+			expr += fmt.Sprintf(`.hasText(%s)`, strconv.Quote(hasText))
+		}
+		if attValue != "" {
+			expr += fmt.Sprintf(`.hasAttValue(%s)`, strconv.Quote(attValue))
+		}
+		return expr
+	}
+
+	if len(selectors) == 1 {
+		return addFilters(fmt.Sprintf(`document.querySelectorAll(%s)`, strconv.Quote(selectors[0])))
+	}
+
+	// Multiple selectors: try each in order to preserve priority (e.g. "button" before "div").
+	var b strings.Builder
+	b.WriteString("(function(){var r;")
+	for i, sel := range selectors {
+		expr := addFilters(fmt.Sprintf(`document.querySelectorAll(%s)`, strconv.Quote(sel)))
+		fmt.Fprintf(&b, "r=%s;", expr)
+		if i < len(selectors)-1 {
+			b.WriteString("if(r.length)return r;")
+		}
+	}
+	b.WriteString("return r;})()")
+	return b.String()
+}
+
 func cmdInject(args []string) error {
 	fs := newFlagSet("inject", "usage: cdp inject <name> [--force]")
 	force := fs.Bool("force", false, "Force re-injection even if WebNav is already present")
@@ -137,11 +177,8 @@ func cmdClick(args []string) error {
 		return err
 	}
 
-	selectorsJSON, err := json.Marshal(selectors)
-	if err != nil {
-		return err
-	}
-	expression := fmt.Sprintf(`window.WebNavClick(%s, %s, %s, %d)`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *count)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	expression := fmt.Sprintf(`window.WebNavClick(%s, %d)`, targetExpr, *count)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -245,11 +282,8 @@ func cmdHover(args []string) error {
 		return err
 	}
 
-	selectorsJSON, err := json.Marshal(selectors)
-	if err != nil {
-		return err
-	}
-	expression := fmt.Sprintf(`window.WebNavHover(%s, %s, %s)`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	expression := fmt.Sprintf(`window.WebNavHover(%s)`, targetExpr)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -481,9 +515,7 @@ func cmdKey(args []string) error {
 	}
 
 	if !*useCDP {
-		expression := fmt.Sprintf(`window.WebNavKey({key:%s, code:%s, ctrlKey:%t, shiftKey:%t, altKey:%t, metaKey:%t})`,
-			strconv.Quote(keySpec.key), strconv.Quote(keySpec.code),
-			keySpec.modifiers&2 != 0, keySpec.modifiers&8 != 0, keySpec.modifiers&1 != 0, keySpec.modifiers&4 != 0)
+		expression := fmt.Sprintf(`window.WebNavKey(%s)`, strconv.Quote(spec))
 		if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 			return err
 		}
@@ -601,11 +633,8 @@ func cmdType(args []string) error {
 		return err
 	}
 
-	selectorsJSON, err := json.Marshal(selectors)
-	if err != nil {
-		return err
-	}
-	expression := fmt.Sprintf(`window.WebNavTypePrepare(%s, %s, %s, %s, %t)`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), strconv.Quote(text), *appendText)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	expression := fmt.Sprintf(`window.WebNavTypePrepare(%s, %s, %t)`, targetExpr, strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -634,7 +663,7 @@ func cmdType(args []string) error {
 		return nil
 	}
 
-	fallback := fmt.Sprintf(`window.WebNavTypeFallback(%s, %s, %s, %s, %t)`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), strconv.Quote(text), *appendText)
+	fallback := fmt.Sprintf(`window.WebNavTypeFallback(%s, %s, %t)`, targetExpr, strconv.Quote(text), *appendText)
 	fallbackValue, err := handle.client.Evaluate(ctx, fallback)
 	if err != nil {
 		return err

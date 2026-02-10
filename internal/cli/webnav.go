@@ -8,37 +8,7 @@ import (
 )
 
 const webNavScript = `(function(){
-  const VERSION = "1";
-  if (window.WebNavInjected && window.WebNavVersion === VERSION) { return; }
-
-  function compileRegex(spec) {
-    if (!spec) return null;
-    if (spec.length >= 2 && spec[0] === "/") {
-      const last = spec.lastIndexOf("/");
-      if (last > 0) {
-        const pattern = spec.slice(1, last);
-        const flags = spec.slice(last + 1);
-        try { return new RegExp(pattern, flags); } catch (e) {}
-      }
-    }
-    try { return new RegExp(spec); } catch (e) {
-      throw new Error("invalid regex: " + spec + " (" + (e && e.message ? e.message : e) + ")");
-    }
-  }
-
-  function elementText(el) {
-    return (el && (el.innerText || el.textContent)) || "";
-  }
-
-  function attrValueMatches(el, re) {
-    const attrs = (el && el.attributes) || null;
-    if (!attrs) return false;
-    for (let i = 0; i < attrs.length; i++) {
-      const v = attrs[i] && attrs[i].value ? attrs[i].value : "";
-      if (re.test(v)) return true;
-    }
-    return false;
-  }
+  if (window.WebNavInjected) { return; }
 
   function isIterable(input) {
     return input && typeof input !== "string" && typeof input[Symbol.iterator] === "function";
@@ -94,6 +64,18 @@ const webNavScript = `(function(){
       return new WebNavElements(...this.filter((el) => getHay(el).includes(needle)));
     }
 
+    hasAttValue(value) {
+      const needle = String(value);
+      return new WebNavElements(...this.filter((el) => {
+        const attrs = el.attributes;
+        if (!attrs) return false;
+        for (let i = 0; i < attrs.length; i++) {
+          if ((attrs[i].value || "").includes(needle)) return true;
+        }
+        return false;
+      }));
+    }
+
     querySelectorAll(sel) {
       return new WebNavElements(
         ...this.flatMap((el) => Array.from(el.querySelectorAll(sel)))
@@ -126,6 +108,12 @@ const webNavScript = `(function(){
     };
   }
 
+  if (!NodeList.prototype.hasAttValue) {
+    NodeList.prototype.hasAttValue = function (value) {
+      return toWebNavElements(this).hasAttValue(value);
+    };
+  }
+
   if (!NodeList.prototype.querySelectorAll) {
     NodeList.prototype.querySelectorAll = function (sel) {
       return toWebNavElements(this).querySelectorAll(sel);
@@ -138,37 +126,34 @@ const webNavScript = `(function(){
     };
   }
 
-  function resolveElement(input, hasTextSpec, attValueSpec) {
+  function resolveElement(input) {
     if (input && input.nodeType === 1) {
       return { el: input, selector: "" };
     }
 
+    // Array of strings: try each as CSS selector (fallback pattern)
+    if (Array.isArray(input) && input.length > 0 && typeof input[0] === "string") {
+      for (const selector of input) {
+        const el = document.querySelector(selector);
+        if (el) return { el, selector };
+      }
+      return { el: null, selector: "" };
+    }
+
+    // Iterable of elements (NodeList, WebNavElements from .hasText() chains, etc.)
     if (isIterable(input)) {
       const list = toArray(input).filter((item) => item && item.nodeType === 1);
-      if (list.length > 0) {
-        return { el: list[0], selector: "" };
-      }
+      if (list.length > 0) return { el: list[0], selector: "" };
+      return { el: null, selector: "" };
     }
 
-    const selectors = normalizeSelectors(input);
-    const hasTextRe = compileRegex(hasTextSpec);
-    const attValueRe = compileRegex(attValueSpec);
-
-    let el = null;
-    let usedSelector = "";
-    for (let s = 0; s < selectors.length && !el; s++) {
-      const selector = selectors[s];
-      const list = Array.from(document.querySelectorAll(selector));
-      for (let i = 0; i < list.length; i++) {
-        const cand = list[i];
-        if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
-        if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
-        el = cand;
-        usedSelector = selector;
-        break;
-      }
+    // Single string selector
+    if (typeof input === "string") {
+      const el = document.querySelector(input);
+      return { el, selector: input };
     }
-    return { el, selector: usedSelector };
+
+    return { el: null, selector: "" };
   }
 
   function focusElement(el) {
@@ -181,26 +166,89 @@ const webNavScript = `(function(){
     }
   }
 
+  // --- Key string parsing ---
+  function parseKeyString(spec) {
+    const modMap = {
+      ctrl: "ctrlKey", control: "ctrlKey",
+      alt: "altKey",
+      meta: "metaKey", cmd: "metaKey", command: "metaKey", win: "metaKey",
+      shift: "shiftKey",
+    };
+    const namedKeys = {
+      enter: {key: "Enter", code: "Enter"},
+      escape: {key: "Escape", code: "Escape"},
+      esc: {key: "Escape", code: "Escape"},
+      tab: {key: "Tab", code: "Tab"},
+      backspace: {key: "Backspace", code: "Backspace"},
+      delete: {key: "Delete", code: "Delete"},
+      space: {key: " ", code: "Space"},
+      arrowup: {key: "ArrowUp", code: "ArrowUp"},
+      arrowdown: {key: "ArrowDown", code: "ArrowDown"},
+      arrowleft: {key: "ArrowLeft", code: "ArrowLeft"},
+      arrowright: {key: "ArrowRight", code: "ArrowRight"},
+      home: {key: "Home", code: "Home"},
+      end: {key: "End", code: "End"},
+      pageup: {key: "PageUp", code: "PageUp"},
+      pagedown: {key: "PageDown", code: "PageDown"},
+    };
+    for (let i = 1; i <= 12; i++) namedKeys["f" + i] = {key: "F" + i, code: "F" + i};
+
+    const tokens = spec.split("+");
+    const mods = {ctrlKey: false, shiftKey: false, altKey: false, metaKey: false};
+    let keyToken = null;
+
+    for (const t of tokens) {
+      const s = t.trim();
+      const lower = s.toLowerCase();
+      if (modMap[lower]) {
+        mods[modMap[lower]] = true;
+        continue;
+      }
+      if (keyToken !== null) throw new Error("only one non-modifier key: " + spec);
+      keyToken = s;
+    }
+
+    if (!keyToken) throw new Error("no key in spec: " + spec);
+
+    const lower = keyToken.toLowerCase();
+    if (namedKeys[lower]) return { ...namedKeys[lower], ...mods };
+
+    if (keyToken.length === 1) {
+      const ch = keyToken;
+      const upper = ch.toUpperCase();
+      let code = "";
+      if (upper >= "A" && upper <= "Z") {
+        code = "Key" + upper;
+        if (ch === upper && !mods.shiftKey) mods.shiftKey = true;
+      } else if (ch >= "0" && ch <= "9") {
+        code = "Digit" + ch;
+      }
+      return { key: ch, code, ...mods };
+    }
+
+    throw new Error("unknown key: " + keyToken);
+  }
+
   const WebNav = {};
 
   WebNav.focus = function(target) {
-    const resolved = resolveElement(target, "", "");
+    const resolved = resolveElement(target);
     if (!resolved.el) throw new Error("no element matched selector");
     focusElement(resolved.el);
     return true;
   };
 
-  WebNav.click = function(target, hasTextSpec, attValueSpec, count, opts) {
+  WebNav.click = function(target, count, opts) {
     const clicks = count && count > 0 ? count : 1;
-    if (isIterable(target)) {
+
+    // If target is a direct iterable of elements and opts.all, click all
+    if (opts && opts.all && isIterable(target)) {
       const list = toArray(target).filter((item) => item && item.nodeType === 1);
       if (!list.length) {
-        throw new Error("no element matched selectors/filters: ");
+        throw new Error("no element matched");
       }
-      const useAll = opts && opts.all === true;
-      const targets = useAll ? list : [list[0]];
       let submitForm = false;
-      for (const el of targets) {
+      for (const el of list) {
         focusElement(el);
         const tag = el.tagName ? el.tagName.toLowerCase() : "";
         let isSubmit = false;
@@ -220,10 +268,10 @@ const webNavScript = `(function(){
       return { submitForm, selector: "" };
     }
 
-    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+    const resolved = resolveElement(target);
     if (!resolved.el) {
       const selectors = normalizeSelectors(target);
-      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+      throw new Error("no element matched selectors: " + selectors.join(", "));
     }
     const el = resolved.el;
     focusElement(el);
@@ -243,11 +291,11 @@ const webNavScript = `(function(){
     return { submitForm: isSubmit && inForm, selector: resolved.selector };
   };
 
-  WebNav.hover = function(target, hasTextSpec, attValueSpec) {
-    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+  WebNav.hover = function(target) {
+    const resolved = resolveElement(target);
     if (!resolved.el) {
       const selectors = normalizeSelectors(target);
-      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+      throw new Error("no element matched selectors: " + selectors.join(", "));
     }
     const el = resolved.el;
     focusElement(el);
@@ -289,6 +337,12 @@ const webNavScript = `(function(){
 
     function pick(target, index) {
       if (target && target.nodeType === 1) return { el: target, list: [target] };
+      if (isIterable(target)) {
+        const list = toArray(target).filter((item) => item && item.nodeType === 1);
+        if (!list.length) return { el: null, list };
+        const idx = Math.min(Math.max(index || 0, 0), list.length - 1);
+        return { el: list[idx], list };
+      }
       if (typeof target !== "string") return { el: null, list: [] };
       const list = Array.from(document.querySelectorAll(target));
       if (!list.length) return { el: null, list };
@@ -370,7 +424,7 @@ const webNavScript = `(function(){
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    const resolved = resolveElement(target, "", "");
+    const resolved = resolveElement(target);
     if (!resolved.el) throw new Error("no element matched selector: " + target);
     const el = resolved.el;
     focusElement(el);
@@ -424,26 +478,38 @@ const webNavScript = `(function(){
     return { points: points.length };
   };
 
-  WebNav.key = function(opts) {
-    const params = {
-      key: opts && opts.key ? opts.key : "",
-      code: opts && opts.code ? opts.code : "",
+  WebNav.key = function(spec) {
+    let params;
+    if (typeof spec === "string") {
+      params = parseKeyString(spec);
+    } else {
+      params = {
+        key: spec && spec.key ? spec.key : "",
+        code: spec && spec.code ? spec.code : "",
+        ctrlKey: !!(spec && spec.ctrlKey),
+        shiftKey: !!(spec && spec.shiftKey),
+        altKey: !!(spec && spec.altKey),
+        metaKey: !!(spec && spec.metaKey),
+      };
+    }
+    const eventInit = {
+      key: params.key,
+      code: params.code,
       bubbles: true,
-      ctrlKey: !!(opts && opts.ctrlKey),
-      shiftKey: !!(opts && opts.shiftKey),
-      altKey: !!(opts && opts.altKey),
-      metaKey: !!(opts && opts.metaKey),
+      ctrlKey: !!params.ctrlKey,
+      shiftKey: !!params.shiftKey,
+      altKey: !!params.altKey,
+      metaKey: !!params.metaKey,
     };
-    document.dispatchEvent(new KeyboardEvent("keydown", params));
-    document.dispatchEvent(new KeyboardEvent("keyup", params));
+    document.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+    document.dispatchEvent(new KeyboardEvent("keyup", eventInit));
     return true;
   };
 
-  WebNav.typePrepare = function(target, hasTextSpec, attValueSpec, inputText, append) {
-    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+  WebNav.typePrepare = function(target, inputText, append) {
+    const resolved = resolveElement(target);
     if (!resolved.el) {
-      const selectors = normalizeSelectors(target);
-      throw new Error("no element matched selectors/filters: " + selectors.join(", "));
+      throw new Error("no element matched");
     }
     const el = resolved.el;
     focusElement(el);
@@ -494,14 +560,56 @@ const webNavScript = `(function(){
     return { found: true, editable: false, contentEditable: false, handled: false, selector: resolved.selector };
   };
 
-  WebNav.typeFallback = function(target, hasTextSpec, attValueSpec, inputText, append) {
-    const resolved = resolveElement(target, hasTextSpec, attValueSpec);
+  WebNav.typeFallback = function(target, inputText, append) {
+    const resolved = resolveElement(target);
     if (!resolved.el) return { ok: false };
     const el = resolved.el;
     if (!append) {
       el.textContent = "";
     }
     el.textContent = append ? el.textContent + String(inputText) : String(inputText);
+    return { ok: true, selector: resolved.selector };
+  };
+
+  WebNav.type = function(target, inputText, append) {
+    const resolved = resolveElement(target);
+    if (!resolved.el) {
+      throw new Error("no element matched");
+    }
+    const el = resolved.el;
+    focusElement(el);
+
+    const tag = (el.tagName || "").toLowerCase();
+    const isInput = tag === "input";
+    const isTextarea = tag === "textarea";
+
+    if (isInput || isTextarea) {
+      const next = append ? String(el.value || "") + String(inputText) : String(inputText);
+      const proto = isInput ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) {
+        setter.call(el, next);
+      } else {
+        el.value = next;
+      }
+      try {
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+      } catch (e) {}
+      return { ok: true, selector: resolved.selector };
+    }
+
+    if (el.isContentEditable) {
+      if (!append) el.textContent = "";
+      el.textContent = append ? el.textContent + String(inputText) : String(inputText);
+      try {
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+      } catch (e) {}
+      return { ok: true, selector: resolved.selector };
+    }
+
+    // Last resort
+    el.textContent = append ? (el.textContent || "") + String(inputText) : String(inputText);
     return { ok: true, selector: resolved.selector };
   };
 
@@ -559,12 +667,12 @@ const webNavScript = `(function(){
   window.WebNavDrag = WebNav.drag;
   window.WebNavGesture = WebNav.gesture;
   window.WebNavKey = WebNav.key;
+  window.WebNavType = WebNav.type;
   window.WebNavTypePrepare = WebNav.typePrepare;
   window.WebNavTypeFallback = WebNav.typeFallback;
   window.WebNavScroll = WebNav.scroll;
   window.WebNavFocus = WebNav.focus;
   window.WebNavInjected = true;
-  window.WebNavVersion = VERSION;
 })();`
 
 func ensureWebNavInjected(ctx context.Context, client *cdp.Client) error {
