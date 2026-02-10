@@ -40,6 +40,17 @@ const webNavScript = `(function(){
     return false;
   }
 
+  function isIterable(input) {
+    return input && typeof input !== "string" && typeof input[Symbol.iterator] === "function";
+  }
+
+  function toArray(input) {
+    if (!input) return [];
+    if (Array.isArray(input)) return input;
+    if (isIterable(input)) return Array.from(input);
+    return [];
+  }
+
   function normalizeSelectors(input) {
     if (!input) return [];
     if (typeof input === "string") return [input];
@@ -47,9 +58,96 @@ const webNavScript = `(function(){
     return [];
   }
 
+  class WebNavElements extends Array {
+    hasText(text, {
+      caseSensitive = true,
+      visible = false,
+      trim = false,
+      normalizeWhitespace = true,
+      includeDescendants = true,
+    } = {}) {
+      const needle = caseSensitive ? String(text) : String(text).toLowerCase();
+
+      const getDirectText = (el) => {
+        let s = "";
+        for (const node of el.childNodes) {
+          if (node && node.nodeType === Node.TEXT_NODE) {
+            s += node.textContent || "";
+          }
+        }
+        return s;
+      };
+
+      const getHay = (el) => {
+        let s = "";
+        if (visible) {
+          s = el.innerText || "";
+        } else {
+          s = includeDescendants ? (el.textContent || "") : getDirectText(el);
+        }
+        if (normalizeWhitespace) s = s.replace(/\s+/g, " ");
+        if (trim) s = s.trim();
+        if (!caseSensitive) s = s.toLowerCase();
+        return s;
+      };
+
+      return new WebNavElements(...this.filter((el) => getHay(el).includes(needle)));
+    }
+
+    querySelectorAll(sel) {
+      return new WebNavElements(
+        ...this.flatMap((el) => Array.from(el.querySelectorAll(sel)))
+      );
+    }
+
+    querySelector(sel) {
+      for (const el of this) {
+        const found = el.querySelector(sel);
+        if (found) return found;
+      }
+      return null;
+    }
+  }
+
+  const toWebNavElements = (iterable) => {
+    if (iterable instanceof WebNavElements) {
+      return iterable;
+    }
+    return new WebNavElements(...iterable);
+  };
+
+  if (!window.WebNavElements) {
+    window.WebNavElements = WebNavElements;
+  }
+
+  if (!NodeList.prototype.hasText) {
+    NodeList.prototype.hasText = function (text, opts) {
+      return toWebNavElements(this).hasText(text, opts);
+    };
+  }
+
+  if (!NodeList.prototype.querySelectorAll) {
+    NodeList.prototype.querySelectorAll = function (sel) {
+      return toWebNavElements(this).querySelectorAll(sel);
+    };
+  }
+
+  if (!NodeList.prototype.querySelector) {
+    NodeList.prototype.querySelector = function (sel) {
+      return toWebNavElements(this).querySelector(sel);
+    };
+  }
+
   function resolveElement(input, hasTextSpec, attValueSpec) {
     if (input && input.nodeType === 1) {
       return { el: input, selector: "" };
+    }
+
+    if (isIterable(input)) {
+      const list = toArray(input).filter((item) => item && item.nodeType === 1);
+      if (list.length > 0) {
+        return { el: list[0], selector: "" };
+      }
     }
 
     const selectors = normalizeSelectors(input);
@@ -92,7 +190,36 @@ const webNavScript = `(function(){
     return true;
   };
 
-  WebNav.click = function(target, hasTextSpec, attValueSpec, count) {
+  WebNav.click = function(target, hasTextSpec, attValueSpec, count, opts) {
+    const clicks = count && count > 0 ? count : 1;
+    if (isIterable(target)) {
+      const list = toArray(target).filter((item) => item && item.nodeType === 1);
+      if (!list.length) {
+        throw new Error("no element matched selectors/filters: ");
+      }
+      const useAll = opts && opts.all === true;
+      const targets = useAll ? list : [list[0]];
+      let submitForm = false;
+      for (const el of targets) {
+        focusElement(el);
+        const tag = el.tagName ? el.tagName.toLowerCase() : "";
+        let isSubmit = false;
+        if (tag === "button") {
+          const t = el.getAttribute("type");
+          isSubmit = !t || String(t).toLowerCase() === "submit";
+        } else if (tag === "input") {
+          const t = el.getAttribute("type") || el.type;
+          isSubmit = String(t || "").toLowerCase() === "submit";
+        }
+        const inForm = !!(el.closest && el.closest("form"));
+        if (isSubmit && inForm) submitForm = true;
+        for (let i = 0; i < clicks; i++) {
+          el.click();
+        }
+      }
+      return { submitForm, selector: "" };
+    }
+
     const resolved = resolveElement(target, hasTextSpec, attValueSpec);
     if (!resolved.el) {
       const selectors = normalizeSelectors(target);
@@ -110,7 +237,6 @@ const webNavScript = `(function(){
       isSubmit = String(t || "").toLowerCase() === "submit";
     }
     const inForm = !!(el.closest && el.closest("form"));
-    const clicks = count && count > 0 ? count : 1;
     for (let i = 0; i < clicks; i++) {
       el.click();
     }

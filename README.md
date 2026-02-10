@@ -63,6 +63,7 @@ cdp eval manager "window.WebNavScroll(200, 0, '#scroll-pane', true)"
 
 Notes:
 - `WebNavClick(target, hasTextSpec, attValueSpec, count)` returns `{submitForm, selector}`.
+- `WebNavClick` accepts NodeList/HTMLCollection/iterables. By default it clicks the first element; pass `opts={all:true}` to click all (e.g. `WebNavClick(document.querySelectorAll('button'), '', '', 1, {all:true})`).
 - `WebNavHover(target, hasTextSpec, attValueSpec)` returns `{x, y, selector}`.
 - `WebNavDrag(fromTarget, toTarget, fromIndex, toIndex, delayMs)` performs a drag/drop.
 - `WebNavGesture(target, points, delayMs)` performs pointer down/move/up along `[[x,y], ...]` relative to the element.
@@ -70,8 +71,10 @@ Notes:
 - `WebNavTypePrepare(target, hasTextSpec, attValueSpec, inputText, append)` prepares selection/value and returns a state object. If `handled` is false, you can follow with `Input.insertText` (what `cdp type` does).
 - `WebNavTypeFallback(target, hasTextSpec, attValueSpec, inputText, append)` is a last-resort textContent setter.
 - `WebNavScroll(yPx, xPx, elementTarget, emit)` scrolls window or element and returns `{scrollTop, scrollLeft}`.
+- `WebNavElements.hasText(text, opts)` filters an element collection by text content. It is available on `NodeList` as `hasText` when WebNav is injected.
 
-## other similar projects
-- `https://github.com/myers/cdp-cli`: looks pretty good judging from the README.
-would probably be fine for my use case tbh but I just personally prefer only
-using software that I've watched codex make. and I dislike node
+Example:
+
+```
+cdp eval manager "WebNavClick(document.querySelectorAll('button').hasText('Press me'))"
+```
