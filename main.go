@@ -269,6 +269,7 @@ func cmdEval(args []string) error {
 	timeout := fs.Duration("timeout", 10*time.Second, "Eval timeout")
 	file := fs.String("file", "", "Read JS from file path ('-' for stdin)")
 	readStdin := fs.Bool("stdin", false, "Read JS from stdin")
+	body := fs.Bool("body", false, "Treat input as a function body (wrap in an IIFE and return its value)")
 	if len(args) == 0 {
 		fs.Usage()
 		return errors.New("usage: cdp eval <name> \"expr\"")
@@ -325,6 +326,10 @@ func cmdEval(args []string) error {
 	if strings.TrimSpace(expression) == "" {
 		return errors.New("JS expression is empty")
 	}
+	bodyInput := expression
+	if *body {
+		expression = "(function(){\n" + expression + "\n})()"
+	}
 
 	st, err := store.Load()
 	if err != nil {
@@ -367,6 +372,13 @@ func cmdEval(args []string) error {
 	output, err := format.JSON(value, *pretty, *depth)
 	if err != nil {
 		return err
+	}
+	if *body && !containsReturnKeyword(bodyInput) {
+		if value == nil {
+			fmt.Fprintln(os.Stderr, "warning: the input function body returned undefined; did you forget to include a return statement?")
+		} else if s, ok := value.(string); ok && s == "undefined" {
+			fmt.Fprintln(os.Stderr, "warning: the input function body returned undefined; did you forget to include a return statement?")
+		}
 	}
 	fmt.Println(output)
 	return nil
@@ -438,6 +450,24 @@ func cmdWait(args []string) error {
 		fmt.Printf("Found: %s\n", *selector)
 	}
 	return nil
+}
+
+func containsReturnKeyword(input string) bool {
+	// Look for a "return " token preceded by a non-alphanumeric or start-of-string.
+	prev := rune(0)
+	seenPrev := false
+	lowered := strings.ToLower(input)
+	for i := 0; i < len(lowered); i++ {
+		ch := rune(lowered[i])
+		if i+7 <= len(lowered) && lowered[i:i+7] == "return " {
+			if !seenPrev || !unicode.IsLetter(prev) && !unicode.IsNumber(prev) {
+				return true
+			}
+		}
+		prev = ch
+		seenPrev = true
+	}
+	return false
 }
 
 func cmdWaitVisible(args []string) error {
