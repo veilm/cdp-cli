@@ -528,7 +528,7 @@ func cmdWaitVisible(args []string) error {
 }
 
 func cmdClick(args []string) error {
-	fs := newFlagSet("click", "usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("click", "usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	count := fs.Int("count", 1, "Number of clicks to perform")
@@ -536,7 +536,7 @@ func cmdClick(args []string) error {
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
+		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -546,25 +546,44 @@ func cmdClick(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp click <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
+	if len(pos) < 1 {
+		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	name := pos[0]
-	selector := pos[1]
+	selector := ""
+	if len(pos) >= 2 {
+		selector = pos[1]
+	}
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
-	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
-	if err != nil {
-		return err
-	}
-	if err := rejectUnsupportedSelector(selector, "click", true); err != nil {
-		return err
+	inlineHasText := ""
+	hasInline := false
+	if selector != "" {
+		selector, inlineHasText, hasInline, err = parseInlineHasText(selector)
+		if err != nil {
+			return err
+		}
+		if err := rejectUnsupportedSelector(selector, "click", true); err != nil {
+			return err
+		}
+	} else if *hasText == "" {
+		return errors.New("usage: cdp click <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")
 	}
 	if *count < 1 {
 		return errors.New("--count must be >= 1")
 	}
-	selector = autoQuoteAttrValues(selector)
+	selectors := []string{}
+	if selector != "" {
+		selectors = append(selectors, autoQuoteAttrValues(selector))
+	} else {
+		selectors = append(selectors, "button", "div")
+	}
+	for _, sel := range selectors {
+		if err := rejectUnsupportedSelector(sel, "click", true); err != nil {
+			return err
+		}
+	}
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -585,8 +604,12 @@ func cmdClick(args []string) error {
 	}
 	defer handle.Close()
 
+	selectorsJSON, err := json.Marshal(selectors)
+	if err != nil {
+		return err
+	}
 	expression := fmt.Sprintf(`(() => {
-        const selector = %s;
+        const selectors = %s;
         const hasTextSpec = %s;
         const attValueSpec = %s;
 
@@ -624,18 +647,23 @@ func cmdClick(args []string) error {
             return false;
         }
 
-        const list = Array.from(document.querySelectorAll(selector));
         let el = null;
-        for (let i = 0; i < list.length; i++) {
-            const cand = list[i];
-            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
-            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
-            el = cand;
-            break;
+        let usedSelector = "";
+        for (let s = 0; s < selectors.length && !el; s++) {
+            const selector = selectors[s];
+            const list = Array.from(document.querySelectorAll(selector));
+            for (let i = 0; i < list.length; i++) {
+                const cand = list[i];
+                if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+                if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+                el = cand;
+                usedSelector = selector;
+                break;
+            }
         }
 
         if (!el) {
-            throw new Error("no element matched selector/filters: " + selector);
+            throw new Error("no element matched selectors/filters: " + selectors.join(", "));
         }
         if (el.scrollIntoView) {
             el.scrollIntoView({block: "center", inline: "center"});
@@ -657,8 +685,8 @@ func cmdClick(args []string) error {
         for (let i = 0; i < clicks; i++) {
             el.click();
         }
-        return { submitForm: isSubmit && inForm };
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *count)
+        return { submitForm: isSubmit && inForm, selector: usedSelector };
+    })()`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *count)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -671,23 +699,29 @@ func cmdClick(args []string) error {
 			}
 		}
 	}
+	usedSelector := selector
+	if m, ok := value.(map[string]interface{}); ok {
+		if sel, _ := m["selector"].(string); sel != "" {
+			usedSelector = sel
+		}
+	}
 	if *count == 1 {
-		fmt.Printf("Clicked: %s\n", selector)
+		fmt.Printf("Clicked: %s\n", usedSelector)
 	} else {
-		fmt.Printf("Clicked: %s (x%d)\n", selector, *count)
+		fmt.Printf("Clicked: %s (x%d)\n", usedSelector, *count)
 	}
 	return nil
 }
 
 func cmdHover(args []string) error {
-	fs := newFlagSet("hover", "usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("hover", "usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	hold := fs.Duration("hold", 0, "Optional time to wait after hovering")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -697,22 +731,41 @@ func cmdHover(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 2 {
-		return errors.New("usage: cdp hover <name> \".selector\" [--has-text REGEX] [--att-value REGEX]")
+	if len(pos) < 1 {
+		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
 	}
 	name := pos[0]
-	selector := pos[1]
+	selector := ""
+	if len(pos) >= 2 {
+		selector = pos[1]
+	}
 	if len(pos) > 2 {
 		return fmt.Errorf("unexpected argument: %s", pos[2])
 	}
-	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
-	if err != nil {
-		return err
+	inlineHasText := ""
+	hasInline := false
+	if selector != "" {
+		selector, inlineHasText, hasInline, err = parseInlineHasText(selector)
+		if err != nil {
+			return err
+		}
+		if err := rejectUnsupportedSelector(selector, "hover", true); err != nil {
+			return err
+		}
+	} else if *hasText == "" {
+		return errors.New("usage: cdp hover <name> [\".selector\"] [--has-text REGEX] [--att-value REGEX]")
 	}
-	if err := rejectUnsupportedSelector(selector, "hover", true); err != nil {
-		return err
+	selectors := []string{}
+	if selector != "" {
+		selectors = append(selectors, autoQuoteAttrValues(selector))
+	} else {
+		selectors = append(selectors, "div")
 	}
-	selector = autoQuoteAttrValues(selector)
+	for _, sel := range selectors {
+		if err := rejectUnsupportedSelector(sel, "hover", true); err != nil {
+			return err
+		}
+	}
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -733,8 +786,12 @@ func cmdHover(args []string) error {
 	}
 	defer handle.Close()
 
+	selectorsJSON, err := json.Marshal(selectors)
+	if err != nil {
+		return err
+	}
 	expression := fmt.Sprintf(`(() => {
-        const selector = %s;
+        const selectors = %s;
         const hasTextSpec = %s;
         const attValueSpec = %s;
 
@@ -770,17 +827,22 @@ func cmdHover(args []string) error {
             return false;
         }
 
-        const list = Array.from(document.querySelectorAll(selector));
         let el = null;
-        for (let i = 0; i < list.length; i++) {
-            const cand = list[i];
-            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
-            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
-            el = cand;
-            break;
+        let usedSelector = "";
+        for (let s = 0; s < selectors.length && !el; s++) {
+            const selector = selectors[s];
+            const list = Array.from(document.querySelectorAll(selector));
+            for (let i = 0; i < list.length; i++) {
+                const cand = list[i];
+                if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+                if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+                el = cand;
+                usedSelector = selector;
+                break;
+            }
         }
         if (!el) {
-            throw new Error("no element matched selector/filters: " + selector);
+            throw new Error("no element matched selectors/filters: " + selectors.join(", "));
         }
         if (el.scrollIntoView) {
             el.scrollIntoView({block: "center", inline: "center"});
@@ -807,16 +869,23 @@ func cmdHover(args []string) error {
         dispatchMouse("mouseenter");
         dispatchMouse("mouseover");
         dispatchMouse("mousemove");
-        return {x, y};
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
+        return {x, y, selector: usedSelector};
+    })()`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue))
 
-	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
+	value, err := handle.client.Evaluate(ctx, expression)
+	if err != nil {
 		return err
 	}
 	if *hold > 0 {
 		time.Sleep(*hold)
 	}
-	fmt.Printf("Hovered: %s\n", selector)
+	usedSelector := selector
+	if m, ok := value.(map[string]interface{}); ok {
+		if sel, _ := m["selector"].(string); sel != "" {
+			usedSelector = sel
+		}
+	}
+	fmt.Printf("Hovered: %s\n", usedSelector)
 	return nil
 }
 
@@ -1233,14 +1302,14 @@ func cmdKey(args []string) error {
 }
 
 func cmdType(args []string) error {
-	fs := newFlagSet("type", "usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
+	fs := newFlagSet("type", "usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]\n(also supports inline :has-text(...) at the end of the selector)")
 	appendText := fs.Bool("append", false, "Append text instead of replacing")
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 0 {
 		fs.Usage()
-		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+		return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	if len(args) == 1 && isHelpArg(args[0]) {
 		fs.Usage()
@@ -1250,23 +1319,46 @@ func cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) < 3 {
-		return errors.New("usage: cdp type <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX]")
+	if len(pos) < 2 {
+		return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
 	}
 	name := pos[0]
-	selector := pos[1]
-	text := pos[2]
+	selector := ""
+	text := ""
+	if len(pos) == 2 {
+		if *hasText == "" {
+			return errors.New("usage: cdp type <name> [\".selector\"] \"text\" [--has-text REGEX] [--att-value REGEX]")
+		}
+		text = pos[1]
+	} else {
+		selector = pos[1]
+		text = pos[2]
+	}
 	if len(pos) > 3 {
 		return fmt.Errorf("unexpected argument: %s", pos[3])
 	}
-	selector, inlineHasText, hasInline, err := parseInlineHasText(selector)
-	if err != nil {
-		return err
+	inlineHasText := ""
+	hasInline := false
+	if selector != "" {
+		selector, inlineHasText, hasInline, err = parseInlineHasText(selector)
+		if err != nil {
+			return err
+		}
+		if err := rejectUnsupportedSelector(selector, "type", true); err != nil {
+			return err
+		}
 	}
-	if err := rejectUnsupportedSelector(selector, "type", true); err != nil {
-		return err
+	selectors := []string{}
+	if selector != "" {
+		selectors = append(selectors, autoQuoteAttrValues(selector))
+	} else {
+		selectors = append(selectors, "input", "textarea")
 	}
-	selector = autoQuoteAttrValues(selector)
+	for _, sel := range selectors {
+		if err := rejectUnsupportedSelector(sel, "type", true); err != nil {
+			return err
+		}
+	}
 	hasTextValue := *hasText
 	if hasInline {
 		hasTextValue = inlineHasText
@@ -1287,8 +1379,12 @@ func cmdType(args []string) error {
 	}
 	defer handle.Close()
 
+	selectorsJSON, err := json.Marshal(selectors)
+	if err != nil {
+		return err
+	}
 	expression := fmt.Sprintf(`(() => {
-        const selector = %s;
+        const selectors = %s;
         const hasTextSpec = %s;
         const attValueSpec = %s;
         const inputText = %s;
@@ -1325,17 +1421,22 @@ func cmdType(args []string) error {
             return false;
         }
 
-        const list = Array.from(document.querySelectorAll(selector));
         let el = null;
-        for (let i = 0; i < list.length; i++) {
-            const cand = list[i];
-            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
-            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
-            el = cand;
-            break;
+        let usedSelector = "";
+        for (let s = 0; s < selectors.length && !el; s++) {
+            const selector = selectors[s];
+            const list = Array.from(document.querySelectorAll(selector));
+            for (let i = 0; i < list.length; i++) {
+                const cand = list[i];
+                if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+                if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+                el = cand;
+                usedSelector = selector;
+                break;
+            }
         }
         if (!el) {
-            throw new Error("no element matched selector/filters: " + selector);
+            throw new Error("no element matched selectors/filters: " + selectors.join(\", \"));
         }
         const append = %t;
         if (el.scrollIntoView) {
@@ -1362,7 +1463,7 @@ func cmdType(args []string) error {
                     el.dispatchEvent(new Event("input", {bubbles: true}));
                     el.dispatchEvent(new Event("change", {bubbles: true}));
                 } catch (e) {}
-                return { found: true, editable: true, contentEditable: false, handled: true };
+                return { found: true, editable: true, contentEditable: false, handled: true, selector: usedSelector };
             }
             if (!append) {
                 el.value = "";
@@ -1373,7 +1474,7 @@ func cmdType(args []string) error {
                     el.setSelectionRange(end, end);
                 } catch (e) {}
             }
-            return { found: true, editable: true, contentEditable: false, handled: false };
+            return { found: true, editable: true, contentEditable: false, handled: false, selector: usedSelector };
         }
         if (el.isContentEditable) {
             if (!append) {
@@ -1385,10 +1486,10 @@ func cmdType(args []string) error {
             const sel = window.getSelection();
             sel.removeAllRanges();
             sel.addRange(range);
-            return { found: true, editable: true, contentEditable: true, handled: false };
+            return { found: true, editable: true, contentEditable: true, handled: false, selector: usedSelector };
         }
-        return { found: true, editable: false, contentEditable: false, handled: false };
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), strconv.Quote(text), *appendText)
+        return { found: true, editable: false, contentEditable: false, handled: false, selector: usedSelector };
+    })()`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
 	if err != nil {
@@ -1398,8 +1499,12 @@ func cmdType(args []string) error {
 	if !ok || state["found"] != true {
 		return errors.New("selector not found")
 	}
+	usedSelector := selector
+	if sel, _ := state["selector"].(string); sel != "" {
+		usedSelector = sel
+	}
 	if handled, _ := state["handled"].(bool); handled {
-		fmt.Printf("Typed into: %s\n", selector)
+		fmt.Printf("Typed into: %s\n", usedSelector)
 		return nil
 	}
 	editable, _ := state["editable"].(bool)
@@ -1409,12 +1514,12 @@ func cmdType(args []string) error {
 		}, nil); err != nil {
 			return err
 		}
-		fmt.Printf("Typed into: %s\n", selector)
+		fmt.Printf("Typed into: %s\n", usedSelector)
 		return nil
 	}
 
 	fallback := fmt.Sprintf(`(() => {
-        const selector = %s;
+        const selectors = %s;
         const hasTextSpec = %s;
         const attValueSpec = %s;
 
@@ -1450,27 +1555,41 @@ func cmdType(args []string) error {
             return false;
         }
 
-        const list = Array.from(document.querySelectorAll(selector));
         let el = null;
-        for (let i = 0; i < list.length; i++) {
-            const cand = list[i];
-            if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
-            if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
-            el = cand;
-            break;
+        let usedSelector = "";
+        for (let s = 0; s < selectors.length && !el; s++) {
+            const selector = selectors[s];
+            const list = Array.from(document.querySelectorAll(selector));
+            for (let i = 0; i < list.length; i++) {
+                const cand = list[i];
+                if (hasTextRe && !hasTextRe.test(elementText(cand))) continue;
+                if (attValueRe && !attrValueMatches(cand, attValueRe)) continue;
+                el = cand;
+                usedSelector = selector;
+                break;
+            }
         }
-        if (!el) { return false; }
+        if (!el) { return { ok: false }; }
         const append = %t;
         if (!append) {
             el.textContent = "";
         }
         el.textContent = append ? el.textContent + %s : %s;
-        return true;
-    })()`, strconv.Quote(selector), strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *appendText, strconv.Quote(text), strconv.Quote(text))
-	if _, err := handle.client.Evaluate(ctx, fallback); err != nil {
+        return { ok: true, selector: usedSelector };
+    })()`, selectorsJSON, strconv.Quote(hasTextValue), strconv.Quote(attValueValue), *appendText, strconv.Quote(text), strconv.Quote(text))
+	fallbackValue, err := handle.client.Evaluate(ctx, fallback)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Typed into: %s\n", selector)
+	if m, ok := fallbackValue.(map[string]interface{}); ok {
+		if okVal, _ := m["ok"].(bool); !okVal {
+			return errors.New("selector not found")
+		}
+		if sel, _ := m["selector"].(string); sel != "" {
+			usedSelector = sel
+		}
+	}
+	fmt.Printf("Typed into: %s\n", usedSelector)
 	return nil
 }
 
