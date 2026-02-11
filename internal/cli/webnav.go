@@ -7,7 +7,7 @@ import (
 	"github.com/veilm/cdp-cli/internal/cdp"
 )
 
-const webNavVersion = 9
+const webNavVersion = 13
 
 var webNavScript = fmt.Sprintf(`(function(){
   var WEBNAV_VERSION = %d;
@@ -65,6 +65,14 @@ var webNavScript = fmt.Sprintf(`(function(){
       };
 
       return new WebNavElements(...this.filter((el) => getHay(el).includes(needle)));
+    }
+
+    preferInner() {
+      // Keep only "deepest" elements: drop any element that contains another matched element.
+      // This helps when matching by subtree text, where outer containers often match too.
+      const all = Array.from(this);
+      const keep = all.filter((el) => !all.some((other) => other !== el && el.contains(other)));
+      return new WebNavElements(...keep);
     }
 
     hasAttValue(value) {
@@ -304,6 +312,7 @@ var webNavScript = fmt.Sprintf(`(function(){
     const after = await WebNav.read(Object.assign({}, readOpts || {}, { rootSelector: el }));
     return {
       selector: resolved.selector || "",
+      tagName: (el && el.tagName) ? String(el.tagName).toLowerCase() : "",
       submitForm: !!(clickResult && clickResult.submitForm),
       before: before,
       after: after,

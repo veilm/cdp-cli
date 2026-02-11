@@ -23,10 +23,25 @@ func cropForTTY(s string, limit int) string {
 	return string(r[:limit]) + "[...]"
 }
 
+func isBareTagSelector(selector string) bool {
+	s := strings.TrimSpace(selector)
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (i > 0 && ch >= '0' && ch <= '9') || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // buildFilteredTargetExpr constructs a JS expression for element targeting.
 // When hasText or attValue are specified, it builds a querySelectorAll chain
 // with .hasText()/.hasAttValue() filters. Otherwise returns the selector(s) as-is.
-func buildFilteredTargetExpr(selectors []string, hasText, attValue string) string {
+func buildFilteredTargetExpr(selectors []string, hasText, attValue string, preferInner bool) string {
 	if hasText == "" && attValue == "" {
 		if len(selectors) == 1 {
 			return strconv.Quote(selectors[0])
@@ -41,6 +56,9 @@ func buildFilteredTargetExpr(selectors []string, hasText, attValue string) strin
 		}
 		if attValue != "" {
 			expr += fmt.Sprintf(`.hasAttValue(%s)`, strconv.Quote(attValue))
+		}
+		if preferInner {
+			expr += `.preferInner()`
 		}
 		return expr
 	}
@@ -110,6 +128,7 @@ func cmdClick(args []string) error {
 	sessionFlag := addSessionFlag(fs)
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	preferInner := fs.String("prefer-inner", "auto", "Prefer inner matches when using --has-text/--att-value (yes|no|auto)")
 	count := fs.Int("count", 1, "Number of clicks to perform")
 	submitWaitMS := fs.Int("submit-wait-ms", 700, "If clicking a submit button inside a form, wait N ms before returning (0 disables)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
@@ -148,6 +167,7 @@ func cmdClick(args []string) error {
 	if selector != "" {
 		selectors = append(selectors, autoQuoteAttrValues(selector))
 	} else {
+		// Default element types when a selector isn't provided.
 		selectors = append(selectors, "button", "div")
 	}
 	for _, sel := range selectors {
@@ -161,6 +181,25 @@ func cmdClick(args []string) error {
 	}
 	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
 	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
+
+	preferInnerMode := strings.ToLower(strings.TrimSpace(*preferInner))
+	if preferInnerMode == "" {
+		preferInnerMode = "auto"
+	}
+	if preferInnerMode != "yes" && preferInnerMode != "no" && preferInnerMode != "auto" {
+		return errors.New("--prefer-inner must be one of: yes, no, auto")
+	}
+	usePreferInner := false
+	if hasTextValue != "" || attValueValue != "" {
+		switch preferInnerMode {
+		case "yes":
+			usePreferInner = true
+		case "no":
+			usePreferInner = false
+		case "auto":
+			usePreferInner = selector == "" || isBareTagSelector(selector)
+		}
+	}
 
 	name, err := resolveSessionName(*sessionFlag)
 	if err != nil {
@@ -184,7 +223,7 @@ func cmdClick(args []string) error {
 		return err
 	}
 
-	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue, usePreferInner)
 
 	readOpts := map[string]interface{}{
 		"waitMs":     0,
@@ -206,15 +245,6 @@ func cmdClick(args []string) error {
 	value, ok := valueAny.(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("unexpected WebNavClickWithRead result type %T", valueAny)
-	}
-
-	resolvedSelector, _ := value["selector"].(string)
-	usedSelector := selector
-	if resolvedSelector != "" {
-		usedSelector = resolvedSelector
-	}
-	if usedSelector == "" && hasTextValue != "" {
-		usedSelector = "(has-text: " + hasTextValue + ")"
 	}
 
 	beforeText := ""
@@ -247,12 +277,6 @@ func cmdClick(args []string) error {
 	}
 
 	beforeDisp := cropForTTY(beforeText, 300)
-	if strings.TrimSpace(beforeDisp) != "" {
-		fmt.Print(beforeDisp)
-		if !strings.HasSuffix(beforeDisp, "\n") {
-			fmt.Print("\n")
-		}
-	}
 
 	if *submitWaitMS > 0 {
 		if submit, _ := value["submitForm"].(bool); submit {
@@ -260,10 +284,20 @@ func cmdClick(args []string) error {
 		}
 	}
 
+	tag, _ := value["tagName"].(string)
+	if tag == "" {
+		tag = "element"
+	}
 	if *count == 1 {
-		fmt.Printf("Clicked: %s\n", usedSelector)
+		fmt.Printf("Clicked %s:\n", tag)
 	} else {
-		fmt.Printf("Clicked: %s %d times\n", usedSelector, *count)
+		fmt.Printf("Clicked %s %d times:\n", tag, *count)
+	}
+	if strings.TrimSpace(beforeDisp) != "" {
+		fmt.Print(beforeDisp)
+		if !strings.HasSuffix(beforeDisp, "\n") {
+			fmt.Print("\n")
+		}
 	}
 
 	afterDisp := cropForTTY(afterText, 300)
@@ -352,7 +386,7 @@ func cmdHover(args []string) error {
 		return err
 	}
 
-	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue, false)
 	expression := fmt.Sprintf(`window.WebNavHover(%s)`, targetExpr)
 
 	value, err := handle.client.Evaluate(ctx, expression)
@@ -707,7 +741,7 @@ func cmdType(args []string) error {
 		return err
 	}
 
-	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue, false)
 	expression := fmt.Sprintf(`window.WebNavTypePrepare(%s, %s, %t)`, targetExpr, strconv.Quote(text), *appendText)
 
 	value, err := handle.client.Evaluate(ctx, expression)
