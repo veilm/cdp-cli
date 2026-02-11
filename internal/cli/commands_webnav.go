@@ -316,6 +316,7 @@ func cmdHover(args []string) error {
 	sessionFlag := addSessionFlag(fs)
 	hasText := fs.String("has-text", "", "Only match elements whose text matches this regex (JS RegExp; accepts /pat/flags or pat)")
 	attValue := fs.String("att-value", "", "Only match elements with at least one attribute value matching this regex (JS RegExp; accepts /pat/flags or pat)")
+	preferInner := fs.String("prefer-inner", "auto", "Prefer inner matches when using --has-text/--att-value (yes|no|auto)")
 	hold := fs.Duration("hold", 0, "Optional time to wait after hovering")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	if len(args) == 1 && isHelpArg(args[0]) {
@@ -363,6 +364,24 @@ func cmdHover(args []string) error {
 	}
 	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
 	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
+	preferInnerMode := strings.ToLower(strings.TrimSpace(*preferInner))
+	if preferInnerMode == "" {
+		preferInnerMode = "auto"
+	}
+	if preferInnerMode != "yes" && preferInnerMode != "no" && preferInnerMode != "auto" {
+		return errors.New("--prefer-inner must be one of: yes, no, auto")
+	}
+	usePreferInner := false
+	if hasTextValue != "" || attValueValue != "" {
+		switch preferInnerMode {
+		case "yes":
+			usePreferInner = true
+		case "no":
+			usePreferInner = false
+		case "auto":
+			usePreferInner = selector == "" || isBareTagSelector(selector)
+		}
+	}
 
 	name, err := resolveSessionName(*sessionFlag)
 	if err != nil {
@@ -386,23 +405,79 @@ func cmdHover(args []string) error {
 		return err
 	}
 
-	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue, false)
-	expression := fmt.Sprintf(`window.WebNavHover(%s)`, targetExpr)
+	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue, usePreferInner)
+	readOpts := map[string]interface{}{
+		"waitMs":     0,
+		"hasText":    "",
+		"attValue":   "",
+		"classLimit": 3,
+	}
+	readOptsJSON, _ := json.Marshal(readOpts)
+	expression := fmt.Sprintf(`window.WebNavHoverWithRead(%s, %s, %d)`, targetExpr, string(readOptsJSON), hold.Milliseconds())
 
-	value, err := handle.client.Evaluate(ctx, expression)
+	raw, err := handle.client.EvaluateRaw(ctx, expression, false)
 	if err != nil {
 		return err
 	}
-	if *hold > 0 {
-		time.Sleep(*hold)
+	valueAny, err := handle.client.RemoteObjectValue(ctx, raw.Result)
+	if err != nil {
+		return err
 	}
-	usedSelector := selector
-	if m, ok := value.(map[string]interface{}); ok {
-		if sel, _ := m["selector"].(string); sel != "" {
-			usedSelector = sel
+	value, ok := valueAny.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("unexpected WebNavHoverWithRead result type %T", valueAny)
+	}
+
+	beforeText := ""
+	if before, ok := value["before"].(map[string]interface{}); ok {
+		if linesAny, ok := before["lines"].([]interface{}); ok {
+			lines := make([]string, 0, len(linesAny))
+			for _, v := range linesAny {
+				if s, ok := v.(string); ok {
+					lines = append(lines, s)
+				} else if v != nil {
+					lines = append(lines, fmt.Sprint(v))
+				}
+			}
+			beforeText = strings.Join(lines, "\n")
 		}
 	}
-	fmt.Printf("Hovered: %s\n", usedSelector)
+	afterText := ""
+	if after, ok := value["after"].(map[string]interface{}); ok {
+		if linesAny, ok := after["lines"].([]interface{}); ok {
+			lines := make([]string, 0, len(linesAny))
+			for _, v := range linesAny {
+				if s, ok := v.(string); ok {
+					lines = append(lines, s)
+				} else if v != nil {
+					lines = append(lines, fmt.Sprint(v))
+				}
+			}
+			afterText = strings.Join(lines, "\n")
+		}
+	}
+
+	beforeDisp := cropForTTY(beforeText, 300)
+	tag, _ := value["tagName"].(string)
+	if tag == "" {
+		tag = "element"
+	}
+	fmt.Printf("Hovered %s:\n", tag)
+	if strings.TrimSpace(beforeDisp) != "" {
+		fmt.Print(beforeDisp)
+		if !strings.HasSuffix(beforeDisp, "\n") {
+			fmt.Print("\n")
+		}
+	}
+
+	afterDisp := cropForTTY(afterText, 300)
+	if beforeDisp != afterDisp && strings.TrimSpace(afterDisp) != "" {
+		fmt.Print("after the hover, element updated to:\n")
+		fmt.Print(afterDisp)
+		if !strings.HasSuffix(afterDisp, "\n") {
+			fmt.Print("\n")
+		}
+	}
 	return nil
 }
 

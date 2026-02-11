@@ -7,7 +7,7 @@ import (
 	"github.com/veilm/cdp-cli/internal/cdp"
 )
 
-const webNavVersion = 13
+const webNavVersion = 14
 
 var webNavScript = fmt.Sprintf(`(function(){
   var WEBNAV_VERSION = %d;
@@ -355,6 +355,29 @@ var webNavScript = fmt.Sprintf(`(function(){
     dispatchMouse("mouseover");
     dispatchMouse("mousemove");
     return { x, y, selector: resolved.selector };
+  };
+
+  WebNav.hoverWithRead = async function(target, readOpts, holdMs) {
+    // Resolve target once and keep a stable element reference for both reads.
+    const resolved = resolveElement(target);
+    if (!resolved.el) {
+      const selectors = normalizeSelectors(target);
+      throw new Error("no element matched selectors: " + selectors.join(", "));
+    }
+    const el = resolved.el;
+
+    const before = await WebNav.read(Object.assign({}, readOpts || {}, { rootSelector: el }));
+    WebNav.hover(el);
+    if (holdMs && holdMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+    }
+    const after = await WebNav.read(Object.assign({}, readOpts || {}, { rootSelector: el }));
+    return {
+      selector: resolved.selector || "",
+      tagName: (el && el.tagName) ? String(el.tagName).toLowerCase() : "",
+      before: before,
+      after: after,
+    };
   };
 
   WebNav.drag = async function(fromTarget, toTarget, fromIndex, toIndex, delayMs) {
@@ -1171,6 +1194,7 @@ var webNavScript = fmt.Sprintf(`(function(){
   window.WebNavFocus = WebNav.focus;
   window.WebNavRead = WebNav.read;
   window.WebNavClickWithRead = WebNav.clickWithRead;
+  window.WebNavHoverWithRead = WebNav.hoverWithRead;
   window.WebNavInjected = true;
   window.WebNavInjectedVersion = WEBNAV_VERSION;
 })();`, webNavVersion)
