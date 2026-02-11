@@ -7,7 +7,7 @@ import (
 	"github.com/veilm/cdp-cli/internal/cdp"
 )
 
-const webNavVersion = 14
+const webNavVersion = 16
 
 var webNavScript = fmt.Sprintf(`(function(){
   var WEBNAV_VERSION = %d;
@@ -29,6 +29,11 @@ var webNavScript = fmt.Sprintf(`(function(){
     if (typeof input === "string") return [input];
     if (Array.isArray(input)) return input;
     return [];
+  }
+
+  // Escape a literal string for safe use inside RegExp(pattern).
+  function webNavEscapeRegExp(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   class WebNavElements extends Array {
@@ -830,20 +835,6 @@ var webNavScript = fmt.Sprintf(`(function(){
       return parts.join("");
     }
 
-    function escapeRegExp(value) {
-      value = String(value || "");
-      var out = "";
-      for (var i = 0; i < value.length; i++) {
-        var ch = value[i];
-        if ("\\\\^$.*+?()[]{}|".indexOf(ch) !== -1) {
-          out += "\\\\" + ch;
-        } else {
-          out += ch;
-        }
-      }
-      return out;
-    }
-
     function buildRegex(value) {
       if (!value) return null;
       if (value[0] === "/" && value.lastIndexOf("/") > 0) {
@@ -852,7 +843,7 @@ var webNavScript = fmt.Sprintf(`(function(){
         var flags = value.slice(last + 1);
         try { return new RegExp(pattern, flags); } catch (e) { return new RegExp(value); }
       }
-      var escaped = escapeRegExp(value);
+      var escaped = webNavEscapeRegExp(value);
       return new RegExp(escaped);
     }
 

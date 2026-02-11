@@ -179,8 +179,7 @@ func cmdClick(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
-	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
-	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
+	attValueValue := *attValue
 
 	preferInnerMode := strings.ToLower(strings.TrimSpace(*preferInner))
 	if preferInnerMode == "" {
@@ -362,8 +361,7 @@ func cmdHover(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
-	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
-	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
+	attValueValue := *attValue
 	preferInnerMode := strings.ToLower(strings.TrimSpace(*preferInner))
 	if preferInnerMode == "" {
 		preferInnerMode = "auto"
@@ -791,8 +789,7 @@ func cmdType(args []string) error {
 	if hasInline {
 		hasTextValue = inlineHasText
 	}
-	hasTextValue = escapeLeadingPlusRegexSpec(hasTextValue)
-	attValueValue := escapeLeadingPlusRegexSpec(*attValue)
+	attValueValue := *attValue
 
 	name, err := resolveSessionName(*sessionFlag)
 	if err != nil {
