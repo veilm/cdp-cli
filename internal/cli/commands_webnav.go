@@ -12,6 +12,17 @@ import (
 	"github.com/veilm/cdp-cli/internal/store"
 )
 
+func cropForTTY(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "[...]"
+}
+
 // buildFilteredTargetExpr constructs a JS expression for element targeting.
 // When hasText or attValue are specified, it builds a querySelectorAll chain
 // with .hasText()/.hasAttValue() filters. Otherwise returns the selector(s) as-is.
@@ -174,32 +185,94 @@ func cmdClick(args []string) error {
 	}
 
 	targetExpr := buildFilteredTargetExpr(selectors, hasTextValue, attValueValue)
-	expression := fmt.Sprintf(`window.WebNavClick(%s, %d)`, targetExpr, *count)
 
-	value, err := handle.client.Evaluate(ctx, expression)
+	readOpts := map[string]interface{}{
+		"waitMs":     0,
+		"hasText":    "",
+		"attValue":   "",
+		"classLimit": 3,
+	}
+	readOptsJSON, _ := json.Marshal(readOpts)
+
+	expression := fmt.Sprintf(`window.WebNavClickWithRead(%s, %d, %s)`, targetExpr, *count, string(readOptsJSON))
+	raw, err := handle.client.EvaluateRaw(ctx, expression, false)
 	if err != nil {
 		return err
 	}
-	if *submitWaitMS > 0 {
-		if m, ok := value.(map[string]interface{}); ok {
-			if submit, _ := m["submitForm"].(bool); submit {
-				time.Sleep(time.Duration(*submitWaitMS) * time.Millisecond)
-			}
-		}
+	valueAny, err := handle.client.RemoteObjectValue(ctx, raw.Result)
+	if err != nil {
+		return err
 	}
+	value, ok := valueAny.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("unexpected WebNavClickWithRead result type %T", valueAny)
+	}
+
+	resolvedSelector, _ := value["selector"].(string)
 	usedSelector := selector
-	if m, ok := value.(map[string]interface{}); ok {
-		if sel, _ := m["selector"].(string); sel != "" {
-			usedSelector = sel
-		}
+	if resolvedSelector != "" {
+		usedSelector = resolvedSelector
 	}
 	if usedSelector == "" && hasTextValue != "" {
 		usedSelector = "(has-text: " + hasTextValue + ")"
 	}
+
+	beforeText := ""
+	if before, ok := value["before"].(map[string]interface{}); ok {
+		if linesAny, ok := before["lines"].([]interface{}); ok {
+			lines := make([]string, 0, len(linesAny))
+			for _, v := range linesAny {
+				if s, ok := v.(string); ok {
+					lines = append(lines, s)
+				} else if v != nil {
+					lines = append(lines, fmt.Sprint(v))
+				}
+			}
+			beforeText = strings.Join(lines, "\n")
+		}
+	}
+	afterText := ""
+	if after, ok := value["after"].(map[string]interface{}); ok {
+		if linesAny, ok := after["lines"].([]interface{}); ok {
+			lines := make([]string, 0, len(linesAny))
+			for _, v := range linesAny {
+				if s, ok := v.(string); ok {
+					lines = append(lines, s)
+				} else if v != nil {
+					lines = append(lines, fmt.Sprint(v))
+				}
+			}
+			afterText = strings.Join(lines, "\n")
+		}
+	}
+
+	beforeDisp := cropForTTY(beforeText, 300)
+	if strings.TrimSpace(beforeDisp) != "" {
+		fmt.Print(beforeDisp)
+		if !strings.HasSuffix(beforeDisp, "\n") {
+			fmt.Print("\n")
+		}
+	}
+
+	if *submitWaitMS > 0 {
+		if submit, _ := value["submitForm"].(bool); submit {
+			time.Sleep(time.Duration(*submitWaitMS) * time.Millisecond)
+		}
+	}
+
 	if *count == 1 {
 		fmt.Printf("Clicked: %s\n", usedSelector)
 	} else {
-		fmt.Printf("Clicked: %s (x%d)\n", usedSelector, *count)
+		fmt.Printf("Clicked: %s %d times\n", usedSelector, *count)
+	}
+
+	afterDisp := cropForTTY(afterText, 300)
+	if beforeDisp != afterDisp && strings.TrimSpace(afterDisp) != "" {
+		fmt.Print("after the click, element updated to:\n")
+		fmt.Print(afterDisp)
+		if !strings.HasSuffix(afterDisp, "\n") {
+			fmt.Print("\n")
+		}
 	}
 	return nil
 }

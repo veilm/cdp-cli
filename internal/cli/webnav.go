@@ -7,8 +7,11 @@ import (
 	"github.com/veilm/cdp-cli/internal/cdp"
 )
 
-const webNavScript = `(function(){
-  if (window.WebNavInjected) { return; }
+const webNavVersion = 9
+
+var webNavScript = fmt.Sprintf(`(function(){
+  var WEBNAV_VERSION = %d;
+  if (window.WebNavInjected && window.WebNavInjectedVersion === WEBNAV_VERSION) { return; }
 
   function isIterable(input) {
     return input && typeof input !== "string" && typeof input[Symbol.iterator] === "function";
@@ -239,7 +242,7 @@ const webNavScript = `(function(){
   };
 
   WebNav.click = function(target, count, opts) {
-    const clicks = count && count > 0 ? count : 1;
+    const clicks = (count && count > 0) ? count : 1;
 
     // If target is a direct iterable of elements and opts.all, click all
     if (opts && opts.all && isIterable(target)) {
@@ -261,9 +264,7 @@ const webNavScript = `(function(){
         }
         const inForm = !!(el.closest && el.closest("form"));
         if (isSubmit && inForm) submitForm = true;
-        for (let i = 0; i < clicks; i++) {
-          el.click();
-        }
+        for (let i = 0; i < clicks; i++) el.click();
       }
       return { submitForm, selector: "" };
     }
@@ -285,10 +286,28 @@ const webNavScript = `(function(){
       isSubmit = String(t || "").toLowerCase() === "submit";
     }
     const inForm = !!(el.closest && el.closest("form"));
-    for (let i = 0; i < clicks; i++) {
-      el.click();
-    }
+    for (let i = 0; i < clicks; i++) el.click();
     return { submitForm: isSubmit && inForm, selector: resolved.selector };
+  };
+
+  WebNav.clickWithRead = async function(target, count, readOpts) {
+    // Resolve target once and keep a stable element reference for both reads.
+    const resolved = resolveElement(target);
+    if (!resolved.el) {
+      const selectors = normalizeSelectors(target);
+      throw new Error("no element matched selectors: " + selectors.join(", "));
+    }
+    const el = resolved.el;
+
+    const before = await WebNav.read(Object.assign({}, readOpts || {}, { rootSelector: el }));
+    const clickResult = WebNav.click(el, count);
+    const after = await WebNav.read(Object.assign({}, readOpts || {}, { rootSelector: el }));
+    return {
+      selector: resolved.selector || "",
+      submitForm: !!(clickResult && clickResult.submitForm),
+      before: before,
+      after: after,
+    };
   };
 
   WebNav.hover = function(target) {
@@ -661,18 +680,19 @@ const webNavScript = `(function(){
     return { scrollTop: el.scrollTop, scrollLeft: el.scrollLeft };
   };
 
-  WebNav.read = async function(opts) {
-    opts = opts || {};
-    function sleep(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
+	  WebNav.read = async function(opts) {
+	    opts = opts || {};
+	    function sleep(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
 
-    var waitMs = Number(opts.waitMs || 0);
-    var rootSelector = (opts.rootSelector === undefined || opts.rootSelector === null || opts.rootSelector === "") ? null : String(opts.rootSelector);
-    var hasTextRaw = (opts.hasText === undefined || opts.hasText === null) ? "" : String(opts.hasText);
-    var hasValueRaw = (opts.attValue === undefined || opts.attValue === null) ? "" : String(opts.attValue);
-    var classLimit = Number(opts.classLimit || 3);
-    if (waitMs > 0) await sleep(waitMs);
+	    var waitMs = Number(opts.waitMs || 0);
+	    var rootTarget = (opts.rootSelector === undefined || opts.rootSelector === null || opts.rootSelector === "") ? null : opts.rootSelector;
+	    var rootSelector = (typeof rootTarget === "string") ? rootTarget : null;
+	    var hasTextRaw = (opts.hasText === undefined || opts.hasText === null) ? "" : String(opts.hasText);
+	    var hasValueRaw = (opts.attValue === undefined || opts.attValue === null) ? "" : String(opts.attValue);
+	    var classLimit = Number(opts.classLimit || 3);
+	    if (waitMs > 0) await sleep(waitMs);
 
-    function normalize(s) { return String(s || "").replace(/\\s+/g, " ").trim(); }
+    function normalize(s) { return String(s || "").replace(/\s+/g, " ").trim(); }
 
     function formatHref(href) {
       try {
@@ -692,17 +712,17 @@ const webNavScript = `(function(){
     var containerTags = new Set(["div","main","header","nav","section","article","aside","footer","ul","ol","figure","form","fieldset"]);
     var ignoredTags = new Set(["script","style","noscript"]);
 
-    var lines = [];
-    function emit(level, line) {
-      var text = normalize(line || "");
-      if (!text) return;
-      lines.push(Array(level + 1).join("\\t") + text);
-    }
-    function emitRawLine(level, line) {
-      var text = String(line || "").replace(/\\s+$/, "");
-      if (!text) return;
-      lines.push(Array(level + 1).join("\\t") + text);
-    }
+	    var lines = [];
+	    function emit(level, line) {
+	      var text = normalize(line || "");
+	      if (!text) return;
+	      lines.push(Array(level + 1).join("\t") + text);
+	    }
+	    function emitRawLine(level, line) {
+	      var text = String(line || "").replace(/\s+$/, "");
+	      if (!text) return;
+	      lines.push(Array(level + 1).join("\t") + text);
+	    }
 
     function imgInline(el) {
       var src = el.getAttribute("src") || "";
@@ -766,7 +786,7 @@ const webNavScript = `(function(){
       var parts = [tag];
       if (id) parts.push("#" + id);
       if (cls) {
-        var clsShort = cls.split(/\\s+/).slice(0, classLimit).join(".");
+        var clsShort = cls.split(/\s+/).slice(0, classLimit).join(".");
         parts.push("." + clsShort);
       }
       if (role) parts.push("[role=" + role + "]");
@@ -813,7 +833,7 @@ const webNavScript = `(function(){
 
     function isSimpleClassSelector(sel) {
       if (!sel) return false;
-      if (/[\\s>#\\[:]/.test(sel)) return false;
+      if (/[\s>#\[:]/.test(sel)) return false;
       if (sel.indexOf(".") === -1) return false;
       return true;
     }
@@ -900,8 +920,8 @@ const webNavScript = `(function(){
     }
 
     function emitPre(el, level) {
-      var raw = String(el.textContent || "").replace(/\\r\\n?/g, "\\n");
-      var parts = raw.split("\\n");
+      var raw = String(el.textContent || "").replace(/\r\n?/g, "\n");
+      var parts = raw.split("\n");
       if (parts.length <= 1) {
         var one = normalize(raw);
         if (one) emit(level, "pre: " + one);
@@ -1044,13 +1064,24 @@ const webNavScript = `(function(){
       if (content3) emit(level, tag + ": " + content3);
     }
 
-    if (!rootSelector) {
+    if (!rootTarget) {
       emit(0, "title: " + normalize(document.title || "Untitled"));
       emit(0, "url: " + location.href);
       emit(0, "");
     }
 
-    var roots = rootSelector ? Array.from(document.querySelectorAll(rootSelector)) : [document.body];
+	    var roots = [];
+	    if (!rootTarget) {
+	      roots = [document.body];
+	    } else if (typeof rootTarget === "string") {
+	      roots = Array.from(document.querySelectorAll(rootTarget));
+	    } else if (rootTarget && rootTarget.nodeType === 1) {
+	      roots = [rootTarget];
+	    } else if (isIterable(rootTarget)) {
+	      roots = toArray(rootTarget).filter((item) => item && item.nodeType === 1);
+	    } else {
+	      roots = [document.body];
+	    }
     var uniqueRoots = [];
     for (var i = 0; i < roots.length; i++) {
       var el = roots[i];
@@ -1130,8 +1161,10 @@ const webNavScript = `(function(){
   window.WebNavScroll = WebNav.scroll;
   window.WebNavFocus = WebNav.focus;
   window.WebNavRead = WebNav.read;
+  window.WebNavClickWithRead = WebNav.clickWithRead;
   window.WebNavInjected = true;
-})();`
+  window.WebNavInjectedVersion = WEBNAV_VERSION;
+})();`, webNavVersion)
 
 func ensureWebNavInjected(ctx context.Context, client *cdp.Client) error {
 	ok, err := isWebNavInjected(ctx, client)
@@ -1145,7 +1178,7 @@ func ensureWebNavInjected(ctx context.Context, client *cdp.Client) error {
 }
 
 func isWebNavInjected(ctx context.Context, client *cdp.Client) (bool, error) {
-	value, err := client.Evaluate(ctx, `(() => !!window.WebNavInjected)()`)
+	value, err := client.Evaluate(ctx, fmt.Sprintf(`(() => (window.WebNavInjected && window.WebNavInjectedVersion === %d))()`, webNavVersion))
 	if err != nil {
 		return false, err
 	}
@@ -1164,9 +1197,8 @@ func injectWebNav(ctx context.Context, client *cdp.Client, force bool) error {
 		}
 	}
 	if force {
-		// The injected script is guarded by `if (window.WebNavInjected) return;`.
 		// Clear the guard so --force actually re-injects updated helpers.
-		_, _ = client.Evaluate(ctx, `(() => { try { window.WebNavInjected = false; } catch (e) {} })()`)
+		_, _ = client.Evaluate(ctx, `(() => { try { window.WebNavInjected = false; window.WebNavInjectedVersion = 0; } catch (e) {} })()`)
 	}
 	if _, err := client.Evaluate(ctx, webNavScript); err != nil {
 		return fmt.Errorf("webnav inject failed: %w", err)
