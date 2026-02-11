@@ -73,15 +73,27 @@ func cmdRead(args []string) error {
 	}
 
 	opts := map[string]interface{}{
-		"waitMs":     *waitMs,
-		"rootSelector": func() interface{} { if selector == "" { return nil }; return selector }(),
+		"waitMs": *waitMs,
+		"rootSelector": func() interface{} {
+			if selector == "" {
+				return nil
+			}
+			return selector
+		}(),
 		"hasText":    *hasText,
 		"attValue":   *attValue,
 		"classLimit": *classLimit,
 	}
 	optsJSON, _ := json.Marshal(opts)
 
-	value, err := handle.client.Evaluate(ctx, fmt.Sprintf("window.WebNavRead(%s)", string(optsJSON)))
+	expression := fmt.Sprintf("window.WebNavRead(%s)", string(optsJSON))
+	// Use the "by reference" eval path (returnByValue=false) since read results can be
+	// large and some Chromium builds are flaky about returning them by value.
+	raw, err := handle.client.EvaluateRaw(ctx, expression, false)
+	if err != nil {
+		return err
+	}
+	value, err := handle.client.RemoteObjectValue(ctx, raw.Result)
 	if err != nil {
 		return err
 	}
@@ -135,4 +147,3 @@ func normalizeSelector(selector string) string {
 	selector = strings.ReplaceAll(selector, `/`, `\/`)
 	return selector
 }
-

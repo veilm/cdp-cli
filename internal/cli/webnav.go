@@ -778,6 +778,20 @@ const webNavScript = `(function(){
       return parts.join("");
     }
 
+    function escapeRegExp(value) {
+      value = String(value || "");
+      var out = "";
+      for (var i = 0; i < value.length; i++) {
+        var ch = value[i];
+        if ("\\\\^$.*+?()[]{}|".indexOf(ch) !== -1) {
+          out += "\\\\" + ch;
+        } else {
+          out += ch;
+        }
+      }
+      return out;
+    }
+
     function buildRegex(value) {
       if (!value) return null;
       if (value[0] === "/" && value.lastIndexOf("/") > 0) {
@@ -786,7 +800,7 @@ const webNavScript = `(function(){
         var flags = value.slice(last + 1);
         try { return new RegExp(pattern, flags); } catch (e) { return new RegExp(value); }
       }
-      var escaped = value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+      var escaped = escapeRegExp(value);
       return new RegExp(escaped);
     }
 
@@ -794,7 +808,7 @@ const webNavScript = `(function(){
     var hasValueRegex = buildRegex(hasValueRaw);
     var includeSet = null;
     var matchInfo = null;
-    var displaySelector = rootSelector ? rootSelector.replace(/\\\\\\//g, "/") : "";
+    var displaySelector = rootSelector ? rootSelector.replace(/\\\//g, "/") : "";
     var noMatchLine = rootSelector ? ("no matches in the DOM for " + displaySelector) : "no-matches";
 
     function isSimpleClassSelector(sel) {
@@ -1148,6 +1162,11 @@ func injectWebNav(ctx context.Context, client *cdp.Client, force bool) error {
 		if ok {
 			return nil
 		}
+	}
+	if force {
+		// The injected script is guarded by `if (window.WebNavInjected) return;`.
+		// Clear the guard so --force actually re-injects updated helpers.
+		_, _ = client.Evaluate(ctx, `(() => { try { window.WebNavInjected = false; } catch (e) {} })()`)
 	}
 	if _, err := client.Evaluate(ctx, webNavScript); err != nil {
 		return fmt.Errorf("webnav inject failed: %w", err)
