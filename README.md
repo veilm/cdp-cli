@@ -35,6 +35,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp keep-alive --session manager` toggles focus/lifecycle emulation and foregrounds the tab so throttled UI pieces start rendering again.
 - Set `CDP_PRETTY=1` in your shell to make pretty JSON the default for eval output.
 - Set `CDP_PORT=9310` (or whatever you need) to change the default DevTools port used by commands that talk to the browser.
+- Set `CDP_SESSION_NAME=manager` to make `--session` optional for commands that operate on a saved session.
 
 ## WebNav Helpers (Injected JS API)
 
