@@ -8,6 +8,13 @@ git clone https://github.com/veilm/cdp-cli
 cdp --help
 ```
 
+Prerequisite: run a Chromium-based browser with its CDP port exposed.
+
+- Chromium example: `chromium --remote-debugging-port=9992`
+- Brave example: `brave --remote-debugging-port=9992`
+- Other Chromium-based browsers use the same flag pattern. Firefox-based browsers aren't supported
+- QtWebEngine-based browsers like qutebrowser are supported; see their docs for how to enable CDP
+
 Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highlights:
 
 - `cdp eval --session manager --file script.js --pretty` (or `--stdin`) runs multi-line scripts without shell gymnastics.
