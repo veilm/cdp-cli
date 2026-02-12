@@ -86,3 +86,9 @@ Example:
 ```
 cdp eval --session manager "WebNavClick(document.querySelectorAll('button').hasText('Press me'))"
 ```
+
+## License
+
+MIT
+
+![pov you use cdp-cli and twitter is scrolling and Claude is updating its memory based on the news, about to trade on it before the market opens](https://sucralose.moe/static/cdp-kage.jpg)
