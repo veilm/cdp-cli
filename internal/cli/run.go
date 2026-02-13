@@ -78,7 +78,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp connect --session <name> --port 9222 --tab 3")
 	fmt.Println("  \t  cdp connect --session <name> --port 9222 --new [--new-url https://example]")
 	fmt.Println("  \t  cdp read --session <name> [options] [selector...]")
-	fmt.Println("  \t  cdp eval --session <name> \"JS expression\" [--pretty] [--depth N] [--json] [--wait]")
+	fmt.Println("  \t  cdp eval --session <name> \"JS expression\" [--pretty=false] [--depth N] [--json] [--wait]")
 	fmt.Println("  \t  cdp wait --session <name> [--selector \".selector\"] [--visible]")
 	fmt.Println("  \t  cdp wait-visible --session <name> \".selector\"")
 	fmt.Println("  \t  cdp click --session <name> \".selector\" [--has-text REGEX] [--att-value REGEX] [--count N] [--submit-wait-ms N]")

@@ -47,7 +47,7 @@ func printTabsUsage() {
 }
 
 func cmdTabsList(args []string) error {
-	fs := newFlagSet("tabs list", "usage: cdp tabs list [--host --port] [--plain] [--pretty]")
+	fs := newFlagSet("tabs list", "usage: cdp tabs list [--host --port] [--plain] [--pretty=false]")
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")

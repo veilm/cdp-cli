@@ -9,10 +9,12 @@ import (
 func defaultPretty() bool {
 	val := strings.ToLower(strings.TrimSpace(os.Getenv("CDP_PRETTY")))
 	switch val {
-	case "1", "true", "yes", "on":
+	case "", "1", "true", "yes", "on":
 		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 
