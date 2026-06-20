@@ -36,6 +36,7 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp key --session manager "Ctrl+s"`
 - `cdp type --session manager ".input" "hello"`
 - `cdp scroll --session manager 800 --element ".scroll-pane"`
+- `cdp wheel --session manager 600 --steps 3` sends native mouse wheel events at a viewport anchor.
 - `cdp upload --session manager "input[type=file]" ./file.txt`
 - `cdp upload` supports multiple files and can `--wait` for the selector to exist (with `--poll` and `--timeout`).
 - `cdp network-log --session manager --dir /tmp/network --url '.*\\.json'` mirrors every Fetch response into timestamped folders so you can `tail -F` or `jq` through the saved request/response artifacts without extra tooling.

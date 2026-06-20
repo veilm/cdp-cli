@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -929,5 +930,153 @@ func cmdScroll(args []string) error {
 		return nil
 	}
 	fmt.Printf("Scrolled by y=%s x=%s -> scrollTop=%s scrollLeft=%s\n", yJS, xJS, formatScrollNumber(posMap["scrollTop"]), formatScrollNumber(posMap["scrollLeft"]))
+	return nil
+}
+
+func viewportAnchor(ctx context.Context, handle *sessionHandle, x, y float64, pixels bool) (float64, float64, error) {
+	if pixels {
+		return x, y, nil
+	}
+	value, err := handle.client.Evaluate(ctx, `({
+		width: window.innerWidth || document.documentElement.clientWidth || 0,
+		height: window.innerHeight || document.documentElement.clientHeight || 0
+	})`)
+	if err != nil {
+		return 0, 0, err
+	}
+	box, ok := value.(map[string]interface{})
+	if !ok {
+		return 0, 0, errors.New("could not read viewport size")
+	}
+	width, _ := box["width"].(float64)
+	height, _ := box["height"].(float64)
+	if width <= 0 || height <= 0 {
+		return 0, 0, errors.New("invalid viewport size")
+	}
+	anchorX := width * x
+	anchorY := height * y
+	anchorX = math.Max(1, math.Min(anchorX, width-1))
+	anchorY = math.Max(1, math.Min(anchorY, height-1))
+	return anchorX, anchorY, nil
+}
+
+func focusTarget(ctx context.Context, handle *sessionHandle) error {
+	if err := handle.client.Call(ctx, "Page.bringToFront", map[string]interface{}{}, nil); err != nil {
+		return err
+	}
+	if handle.session.TargetID != "" {
+		if err := handle.client.Call(ctx, "Target.activateTarget", map[string]interface{}{
+			"targetId": handle.session.TargetID,
+		}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cmdWheel(args []string) error {
+	fs := newFlagSet("wheel", "usage: cdp wheel --session <name> <deltaY> [--delta-x <deltaX>] [--x <coord>] [--y <coord>] [--pixels] [--steps N] [--delay DURATION]")
+	sessionFlag := addSessionFlag(fs)
+	deltaX := fs.Float64("delta-x", 0, "Horizontal wheel delta in pixels per step")
+	anchorX := fs.Float64("x", 0.5, "Pointer anchor x coordinate (fraction of viewport by default)")
+	anchorY := fs.Float64("y", 0.8, "Pointer anchor y coordinate (fraction of viewport by default)")
+	pixels := fs.Bool("pixels", false, "Treat --x/--y as raw viewport pixels instead of fractions")
+	steps := fs.Int("steps", 1, "Number of wheel events to send")
+	delay := fs.Duration("delay", 700*time.Millisecond, "Delay between wheel steps")
+	timeout := fs.Duration("timeout", 15*time.Second, "Command timeout")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return errors.New("missing deltaY")
+	}
+	if len(pos) > 1 {
+		return fmt.Errorf("unexpected argument: %s", pos[1])
+	}
+	if *steps < 1 {
+		return errors.New("--steps must be >= 1")
+	}
+	deltaY, err := strconv.ParseFloat(pos[0], 64)
+	if err != nil {
+		return fmt.Errorf("invalid deltaY %q: %w", pos[0], err)
+	}
+
+	name, err := resolveSessionName(*sessionFlag)
+	if err != nil {
+		fs.Usage()
+		return err
+	}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	handle, err := openSession(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+
+	if err := focusTarget(ctx, handle); err != nil {
+		return err
+	}
+	x, y, err := viewportAnchor(ctx, handle, *anchorX, *anchorY, *pixels)
+	if err != nil {
+		return err
+	}
+	if err := handle.client.Call(ctx, "Input.dispatchMouseEvent", map[string]interface{}{
+		"type":    "mouseMoved",
+		"x":       x,
+		"y":       y,
+		"button":  "none",
+		"buttons": 0,
+	}, nil); err != nil {
+		return err
+	}
+
+	for i := 0; i < *steps; i++ {
+		if err := handle.client.Call(ctx, "Input.dispatchMouseEvent", map[string]interface{}{
+			"type":        "mouseWheel",
+			"x":           x,
+			"y":           y,
+			"deltaX":      *deltaX,
+			"deltaY":      deltaY,
+			"modifiers":   0,
+			"pointerType": "mouse",
+		}, nil); err != nil {
+			return err
+		}
+		if i == *steps-1 || *delay <= 0 {
+			continue
+		}
+		timer := time.NewTimer(*delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	mode := "fraction"
+	if *pixels {
+		mode = "pixels"
+	}
+	fmt.Printf(
+		"Wheel: steps=%d deltaY=%s deltaX=%s anchor=(%s,%s) %s\n",
+		*steps,
+		strconv.FormatFloat(deltaY, 'f', -1, 64),
+		strconv.FormatFloat(*deltaX, 'f', -1, 64),
+		strconv.FormatFloat(*anchorX, 'f', -1, 64),
+		strconv.FormatFloat(*anchorY, 'f', -1, 64),
+		mode,
+	)
 	return nil
 }

@@ -39,6 +39,8 @@ func Run() error {
 		return cmdKey(args)
 	case "scroll":
 		return cmdScroll(args)
+	case "wheel":
+		return cmdWheel(args)
 	case "type":
 		return cmdType(args)
 	case "upload":
@@ -87,6 +89,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp gesture --session <name> \".selector\" \"x1,y1 x2,y2 ...\" [--delay DURATION]  (draw, swipe, slide, trace)")
 	fmt.Println("  \t  cdp key --session <name> KEYS [--element \".selector\"] [--cdp]")
 	fmt.Println("  \t  cdp scroll --session <name> <yPx> [--x <xPx>] [--element \".selector\"] [--emit]")
+	fmt.Println("  \t  cdp wheel --session <name> <deltaY> [--delta-x <deltaX>] [--x <coord>] [--y <coord>] [--pixels] [--steps N] [--delay DURATION]")
 	fmt.Println("  \t  cdp type --session <name> \".selector\" \"text\" [--has-text REGEX] [--att-value REGEX] [--append]")
 	fmt.Println("  \t  cdp upload --session <name> \"input[type=file]\" <file1> [file2 ...] [--wait]")
 	fmt.Println("  \t  cdp inject --session <name> [--force]")
