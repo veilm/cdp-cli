@@ -160,21 +160,27 @@ func cmdTabsOpen(args []string) error {
 	if err != nil {
 		return err
 	}
+	if latest, latestErr := fetchLatestTargetInfo(ctx, *host, *port, tab); latestErr == nil {
+		tab = latest
+	}
 	if tab.URL == "" {
 		tab.URL = pageURL
-	}
-	title := tab.Title
-	if strings.TrimSpace(title) == "" {
-		title = "<untitled>"
 	}
 	if *activate {
 		if err := cdp.ActivateTarget(ctx, *host, *port, tab.ID); err != nil {
 			return err
 		}
-		fmt.Printf("Opened and activated tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+	}
+	issue, _ := detectPageIssue(ctx, rewriteWebSocketURL(tab.WebSocket, *host, *port))
+	if latest, latestErr := fetchLatestTargetInfo(ctx, *host, *port, tab); latestErr == nil {
+		tab = latest
+	}
+	title := formatTargetTitle(tab)
+	if *activate {
+		fmt.Printf("Opened and activated tab: %s (%s)%s\n", abbreviate(title, 60), tab.URL, formatPageIssueSuffix(issue))
 		return nil
 	}
-	fmt.Printf("Opened tab: %s (%s)\n", abbreviate(title, 60), tab.URL)
+	fmt.Printf("Opened tab: %s (%s)%s\n", abbreviate(title, 60), tab.URL, formatPageIssueSuffix(issue))
 	return nil
 }
 

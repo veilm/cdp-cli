@@ -64,6 +64,9 @@ func cmdConnect(args []string) error {
 		if err != nil {
 			return err
 		}
+		if latest, latestErr := fetchLatestTargetInfo(ctx, *host, *port, tab); latestErr == nil {
+			tab = latest
+		}
 		if tab.URL == "" {
 			tab.URL = *newURL
 		}
@@ -111,6 +114,10 @@ func cmdConnect(args []string) error {
 	if _, err := client.Evaluate(ctx, "document.readyState"); err != nil {
 		return fmt.Errorf("tab handshake failed: %w", err)
 	}
+	issue, _ := detectPageIssue(ctx, wsURL)
+	if latest, latestErr := fetchLatestTargetInfo(ctx, *host, *port, target); latestErr == nil {
+		target = latest
+	}
 
 	session := store.Session{
 		Name:           name,
@@ -127,7 +134,7 @@ func cmdConnect(args []string) error {
 	if err := st.Set(session); err != nil {
 		return err
 	}
-	fmt.Printf("Connected %s -> %s (%s)\n", name, target.Title, target.URL)
+	fmt.Printf("Connected %s -> %s (%s)%s\n", name, formatTargetTitle(target), target.URL, formatPageIssueSuffix(issue))
 	return nil
 }
 
