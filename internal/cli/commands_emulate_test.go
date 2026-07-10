@@ -12,7 +12,7 @@ func TestParseEmulationSettings(t *testing.T) {
 		{"tablet", false, emulationSettings{name: "tablet", width: 820, height: 1180, dpr: 2, mobile: true, touch: true}},
 		{"390x844", false, emulationSettings{name: "390x844", width: 390, height: 844, dpr: 2}},
 		{"1024X768", true, emulationSettings{name: "1024X768", width: 1024, height: 768, dpr: 2, mobile: true, touch: true}},
-		{"reset", false, emulationSettings{name: "reset", reset: true}},
+		{"refresh-reset", false, emulationSettings{name: "refresh-reset", reopen: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.device, func(t *testing.T) {
@@ -28,7 +28,7 @@ func TestParseEmulationSettings(t *testing.T) {
 }
 
 func TestParseEmulationSettingsRejectsInvalidValues(t *testing.T) {
-	for _, device := range []string{"watch", "390", "0x844", "390x0"} {
+	for _, device := range []string{"watch", "390", "0x844", "390x0", "reset"} {
 		if _, err := parseEmulationSettings(device, false, 1); err == nil {
 			t.Errorf("expected %q to fail", device)
 		}

@@ -19,13 +19,13 @@ type emulationSettings struct {
 	dpr    float64
 	mobile bool
 	touch  bool
-	reset  bool
+	reopen bool
 }
 
 var customDevicePattern = regexp.MustCompile(`^(\d+)[xX](\d+)$`)
 
 func cmdEmulate(args []string) error {
-	fs := newFlagSet("emulate", "usage: cdp emulate --session <name> <phone|tablet|WIDTHxHEIGHT|reset> [--mobile] [--dpr N]")
+	fs := newFlagSet("emulate", "usage: cdp emulate --session <name> <phone|tablet|WIDTHxHEIGHT|refresh-reset> [--mobile] [--dpr N]")
 	sessionFlag := addSessionFlag(fs)
 	mobile := fs.Bool("mobile", false, "Use mobile metrics and touch for a custom size")
 	dpr := fs.Float64("dpr", 1, "Device pixel ratio")
@@ -67,16 +67,16 @@ func cmdEmulate(args []string) error {
 	}
 	defer handle.Close()
 
+	if settings.reopen {
+		return reopenForReset(ctx, handle)
+	}
+
 	if err := applyEmulation(ctx, handle.client, settings); err != nil {
 		return err
 	}
 	viewport, err := readViewport(ctx, handle.client)
 	if err != nil {
 		return fmt.Errorf("verify emulation: %w", err)
-	}
-	if settings.reset {
-		fmt.Printf("Device emulation reset: %.0fx%.0f, DPR %.6g (%s)\n", viewport.Width, viewport.Height, viewport.DPR, viewport.URL)
-		return nil
 	}
 	mode := "desktop"
 	if settings.mobile {
@@ -95,12 +95,12 @@ func parseEmulationSettings(device string, mobile bool, dpr float64) (emulationS
 		return emulationSettings{name: device, width: 390, height: 844, dpr: dpr, mobile: true, touch: true}, nil
 	case "tablet":
 		return emulationSettings{name: device, width: 820, height: 1180, dpr: dpr, mobile: true, touch: true}, nil
-	case "reset", "desktop":
-		return emulationSettings{name: device, reset: true}, nil
+	case "refresh-reset":
+		return emulationSettings{name: "refresh-reset", reopen: true}, nil
 	}
 	match := customDevicePattern.FindStringSubmatch(device)
 	if match == nil {
-		return emulationSettings{}, fmt.Errorf("unknown device type %q (expected phone, tablet, WIDTHxHEIGHT, or reset)", device)
+		return emulationSettings{}, fmt.Errorf("unknown device type %q (expected phone, tablet, WIDTHxHEIGHT, or refresh-reset)", device)
 	}
 	width, _ := strconv.Atoi(match[1])
 	height, _ := strconv.Atoi(match[2])
@@ -111,12 +111,6 @@ func parseEmulationSettings(device string, mobile bool, dpr float64) (emulationS
 }
 
 func applyEmulation(ctx context.Context, client *cdp.Client, settings emulationSettings) error {
-	if settings.reset {
-		if err := client.Call(ctx, "Emulation.clearDeviceMetricsOverride", nil, nil); err != nil {
-			return err
-		}
-		return client.Call(ctx, "Emulation.setTouchEmulationEnabled", map[string]interface{}{"enabled": false}, nil)
-	}
 	params := map[string]interface{}{
 		"width": settings.width, "height": settings.height,
 		"deviceScaleFactor": settings.dpr, "mobile": settings.mobile,
@@ -131,10 +125,12 @@ func applyEmulation(ctx context.Context, client *cdp.Client, settings emulationS
 }
 
 type viewportInfo struct {
-	URL    string  `json:"url"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-	DPR    float64 `json:"dpr"`
+	URL         string  `json:"url"`
+	Width       float64 `json:"width"`
+	Height      float64 `json:"height"`
+	OuterWidth  float64 `json:"outerWidth"`
+	OuterHeight float64 `json:"outerHeight"`
+	DPR         float64 `json:"dpr"`
 }
 
 func readViewport(ctx context.Context, client *cdp.Client) (viewportInfo, error) {
@@ -144,8 +140,39 @@ func readViewport(ctx context.Context, client *cdp.Client) (viewportInfo, error)
 		} `json:"result"`
 	}
 	err := client.Call(ctx, "Runtime.evaluate", map[string]interface{}{
-		"expression":    "({url: location.href, width: innerWidth, height: innerHeight, dpr: devicePixelRatio})",
+		"expression":    "({url: location.href, width: innerWidth, height: innerHeight, outerWidth, outerHeight, dpr: devicePixelRatio})",
 		"returnByValue": true,
 	}, &response)
 	return response.Result.Value, err
+}
+
+func reopenForReset(ctx context.Context, handle *sessionHandle) error {
+	oldTargetID := handle.session.TargetID
+	fresh, err := cdp.CreateTarget(ctx, handle.session.Host, handle.session.Port, handle.session.URL)
+	if err != nil {
+		return fmt.Errorf("open replacement tab: %w", err)
+	}
+	freshWebSocketURL := rewriteWebSocketURL(fresh.WebSocket, handle.session.Host, handle.session.Port)
+	freshClient, err := cdp.Dial(ctx, freshWebSocketURL)
+	if err != nil {
+		return fmt.Errorf("connect to replacement tab: %w", err)
+	}
+	if err := waitForReadyState(ctx, freshClient, 100*time.Millisecond); err != nil {
+		freshClient.Close()
+		return fmt.Errorf("wait for replacement tab: %w", err)
+	}
+	freshClient.Close()
+	if err := cdp.ActivateTarget(ctx, handle.session.Host, handle.session.Port, fresh.ID); err != nil {
+		return fmt.Errorf("activate replacement tab: %w", err)
+	}
+	handle.session.TargetID = fresh.ID
+	handle.session.WebSocketURL = freshWebSocketURL
+	handle.session.URL = fresh.URL
+	handle.session.Title = fresh.Title
+	handle.session.Type = fresh.Type
+	if err := cdp.CloseTarget(ctx, handle.session.Host, handle.session.Port, oldTargetID); err != nil {
+		fmt.Printf("warning: replacement tab is active but old tab could not be closed: %v\n", err)
+	}
+	fmt.Printf("Refresh-reset reopened %s; temporary page state was discarded\n", handle.session.URL)
+	return nil
 }
