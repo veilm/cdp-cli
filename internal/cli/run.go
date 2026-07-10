@@ -55,6 +55,8 @@ func Run() error {
 		return cmdRect(args)
 	case "screenshot":
 		return cmdScreenshot(args)
+	case "emulate":
+		return cmdEmulate(args)
 	case "log":
 		return cmdLog(args)
 	case "network-log":
@@ -97,6 +99,7 @@ func printUsage() {
 	fmt.Println("  \t  cdp styles --session <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp rect --session <name> \"CSS selector\"")
 	fmt.Println("  \t  cdp screenshot --session <name> [--selector \".composer\"] [--output file.png] [--full-page] [--cdp-clip]")
+	fmt.Println("  \t  cdp emulate --session <name> <phone|tablet|WIDTHxHEIGHT|reset> [--mobile] [--dpr N]")
 	fmt.Println("  \t  cdp log --session <name> [\"setup script\"] [--level REGEX] [--limit N] [--timeout DURATION]")
 	fmt.Println("  \t  cdp network-log --session <name> [--dir PATH] [--url REGEX] [--method REGEX] [--status REGEX] [--mime REGEX]")
 	fmt.Println("  \t  cdp keep-alive --session <name>")
