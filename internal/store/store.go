@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -61,6 +62,10 @@ func Load() (*Store, error) {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveUnlocked()
+}
+
+func (s *Store) saveUnlocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
@@ -77,17 +82,79 @@ func (s *Store) Save() error {
 
 // Set stores / overwrites a named session.
 func (s *Store) Set(session Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lock, err := s.lockFile()
+	if err != nil {
+		return err
+	}
+	defer unlockFile(lock)
+	if err := s.reloadUnlocked(); err != nil {
+		return err
+	}
 	s.Sessions[session.Name] = session
-	return s.Save()
+	return s.saveUnlocked()
 }
 
 // Remove deletes the named session, returning false if it didn't exist.
 func (s *Store) Remove(name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lock, err := s.lockFile()
+	if err != nil {
+		return false, err
+	}
+	defer unlockFile(lock)
+	if err := s.reloadUnlocked(); err != nil {
+		return false, err
+	}
 	if _, ok := s.Sessions[name]; !ok {
 		return false, nil
 	}
 	delete(s.Sessions, name)
-	return true, s.Save()
+	return true, s.saveUnlocked()
+}
+
+func (s *Store) lockFile() (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
+func unlockFile(lock *os.File) {
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_ = lock.Close()
+}
+
+func (s *Store) reloadUnlocked() error {
+	data, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.Sessions = make(map[string]Session)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	latest := &Store{Sessions: make(map[string]Session)}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, latest); err != nil {
+			return fmt.Errorf("parse sessions: %w", err)
+		}
+	}
+	if latest.Sessions == nil {
+		latest.Sessions = make(map[string]Session)
+	}
+	s.Sessions = latest.Sessions
+	return nil
 }
 
 // Get fetches a stored session.
