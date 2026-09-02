@@ -55,6 +55,34 @@ func (e httpStatusError) Error() string {
 	return fmt.Sprintf("%s: %s", http.StatusText(e.status), e.body)
 }
 
+func browserWebSocketURL(ctx context.Context, host string, port int) (string, error) {
+	endpoint := fmt.Sprintf("http://%s:%d/json/version", host, port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("browser version: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var version struct {
+		WebSocket string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&version); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(version.WebSocket) == "" {
+		return "", errors.New("browser does not expose webSocketDebuggerUrl")
+	}
+	return version.WebSocket, nil
+}
+
 // CreateTarget requests a fresh tab pointing at the provided URL.
 func CreateTarget(ctx context.Context, host string, port int, targetURL string) (TargetInfo, error) {
 	endpoint := fmt.Sprintf("http://%s:%d/json/new?%s", host, port, url.QueryEscape(targetURL))
@@ -90,6 +118,34 @@ func CreateTarget(ctx context.Context, host string, port int, targetURL string) 
 		return try(http.MethodGet)
 	}
 	return TargetInfo{}, fmt.Errorf("create target: %w", err)
+}
+
+// CreateTargetInBackground creates a tab without ever making it active.
+// Unlike /json/new, Target.createTarget supports background creation directly.
+func CreateTargetInBackground(ctx context.Context, host string, port int, targetURL string) (TargetInfo, error) {
+	wsURL, err := browserWebSocketURL(ctx, host, port)
+	if err != nil {
+		return TargetInfo{}, fmt.Errorf("find browser websocket: %w", err)
+	}
+	client, err := Dial(ctx, wsURL)
+	if err != nil {
+		return TargetInfo{}, fmt.Errorf("connect to browser websocket: %w", err)
+	}
+	defer client.Close()
+
+	var result struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := client.Call(ctx, "Target.createTarget", map[string]interface{}{
+		"url":        targetURL,
+		"background": true,
+	}, &result); err != nil {
+		return TargetInfo{}, fmt.Errorf("create background target: %w", err)
+	}
+	if result.TargetID == "" {
+		return TargetInfo{}, errors.New("create background target returned no target id")
+	}
+	return TargetInfo{ID: result.TargetID, Type: "page", URL: targetURL}, nil
 }
 
 // FindTarget tries to match a target by URL.

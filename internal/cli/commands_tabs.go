@@ -156,7 +156,12 @@ func cmdTabsOpen(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	tab, err := cdp.CreateTarget(ctx, *host, *port, pageURL)
+	var tab cdp.TargetInfo
+	if *activate {
+		tab, err = cdp.CreateTarget(ctx, *host, *port, pageURL)
+	} else {
+		tab, err = cdp.CreateTargetInBackground(ctx, *host, *port, pageURL)
+	}
 	if err != nil {
 		return err
 	}
