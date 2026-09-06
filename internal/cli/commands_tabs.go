@@ -53,6 +53,10 @@ func cmdTabsList(args []string) error {
 	plain := fs.Bool("plain", false, "Output plain text table instead of JSON")
 	pretty := fs.Bool("pretty", defaultPretty(), "Pretty print JSON output")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
@@ -98,6 +102,10 @@ func cmdTabsSwitch(args []string) error {
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
@@ -140,6 +148,10 @@ func cmdTabsOpen(args []string) error {
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	activate := fs.Bool("activate", true, "Activate the tab after opening")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	pageURL, flagArgs, err := splitTabsOpenArgs(args)
 	if err != nil {
 		return err
@@ -195,6 +207,10 @@ func cmdTabsClose(args []string) error {
 	port := fs.Int("port", portDefault(9222), "DevTools port")
 	timeout := fs.Duration("timeout", 5*time.Second, "Command timeout")
 	sessionName := fs.String("session", "", "Close tab by saved session name")
+	if len(args) == 1 && isHelpArg(args[0]) {
+		fs.Usage()
+		return nil
+	}
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
