@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/veilm/cdp-cli/internal/store"
@@ -93,20 +92,6 @@ func cmdUpload(args []string) error {
 		"nodeId": nodeID,
 		"files":  files,
 	}, nil); err != nil {
-		return err
-	}
-
-	// Nudge frameworks that listen to change events only.
-	expression := fmt.Sprintf(`(() => {
-        const el = document.querySelector(%s);
-        if (!el) return false;
-        try {
-            el.dispatchEvent(new Event("input", {bubbles: true}));
-            el.dispatchEvent(new Event("change", {bubbles: true}));
-        } catch (e) {}
-        return true;
-    })()`, strconv.Quote(selector))
-	if _, err := handle.client.Evaluate(ctx, expression); err != nil {
 		return err
 	}
 
