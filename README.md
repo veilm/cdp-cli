@@ -25,6 +25,9 @@ Use `cdp --help` (or `cdp <command> --help`) for switches and examples. Highligh
 - `cdp tabs list --plain` quickly shows the currently discoverable tabs when you're picking one to connect to.
 - `cdp connect --session manager --tab 3 --port 9222` binds a session by tab index or pattern.
 - `cdp connect --session manager --new --port 9222` opens a new tab and connects it immediately.
+- `cdp connect --session manager --port 9222 --new 'https://example.com/?q=one+two&view=list'` opens that URL in a new tab. `--new --url URL` and the original `--new --new-url URL` are equivalent; omitting the URL opens `about:blank`.
+- `cdp connect --session manager --port 9222 'example.com'` (or `--url 'example.com'`) matches an existing tab without navigating it. Matching tries a case-insensitive exact URL, then prefix, then substring, taking the first match. Use `--tab` for a specific tab when multiple tabs match.
+- Supply one URL, quoting shell punctuation such as `&`. Repeating the same URL is allowed; different URLs conflict. `--tab` cannot be combined with a URL or `--new`, and `--new-url` requires `--new`.
 - `cdp tabs open https://example.com` spawns a fresh tab (foreground by default, pass `--activate=false` for background).
 - `cdp tabs switch 3` (or a target id/pattern) activates a tab directly from the CLI.
 - `cdp wait --session manager --selector ".compose"` and `cdp wait-visible --session manager ".compose"` pause until the page is ready.

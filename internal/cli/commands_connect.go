@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/veilm/cdp-cli/internal/cdp"
@@ -11,14 +12,29 @@ import (
 )
 
 func cmdConnect(args []string) error {
-	fs := newFlagSet("connect", "usage: cdp connect --session <name> --port --url\nor:    cdp connect --session <name> --port --tab <index|id|pattern>\nor:    cdp connect --session <name> --port --new [--new-url <url>]")
+	fs := newFlagSet("connect", `usage: cdp connect --session <name> --port <port> <url>
+or:    cdp connect --session <name> --port <port> --tab <index|id|pattern>
+or:    cdp connect --session <name> --port <port> --new [<url>]
+
+Without --new, <url> (or --url <url>) matches an existing tab: exact URL
+(case-insensitive), then prefix, then substring; the first match wins.
+With --new, open <url> (default about:blank); --url and --new-url are aliases.
+Quote URLs containing shell punctuation such as '&'. Different URLs conflict;
+--tab cannot be combined with a URL or --new.`)
 	sessionFlag := addSessionFlag(fs)
 	host := fs.String("host", "127.0.0.1", "DevTools host")
 	port := fs.Int("port", portDefault(0), "DevTools port")
-	targetURL := fs.String("url", "", "Tab URL to bind to")
+	var urls []connectURL
+	fs.Func("url", "Existing tab URL to match, or URL to open with --new", func(value string) error {
+		urls = append(urls, connectURL{"--url", value})
+		return nil
+	})
 	targetRef := fs.String("tab", "", "Tab index, id, or pattern from tabs list")
 	newTab := fs.Bool("new", false, "Open a new tab and connect to it")
-	newURL := fs.String("new-url", "about:blank", "URL to open when using --new")
+	fs.Func("new-url", "Alias for the URL to open with --new (default about:blank)", func(value string) error {
+		urls = append(urls, connectURL{"--new-url", value})
+		return nil
+	})
 	activate := fs.Bool("activate", true, "Activate the tab after opening (with --new)")
 	timeout := fs.Duration("timeout", 5*time.Second, "Connection timeout")
 	if len(args) == 1 && isHelpArg(args[0]) {
@@ -29,7 +45,8 @@ func cmdConnect(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := unexpectedArgs(pos); err != nil {
+	targetURL, err := resolveConnectURL(pos, urls, *newTab, *targetRef)
+	if err != nil {
 		return err
 	}
 	name, err := resolveSessionName(*sessionFlag)
@@ -39,15 +56,6 @@ func cmdConnect(args []string) error {
 	}
 	if *port == 0 {
 		return errors.New("--port is required")
-	}
-	if *newTab && (*targetURL != "" || *targetRef != "") {
-		return errors.New("use --new without --url or --tab")
-	}
-	if *targetURL != "" && *targetRef != "" {
-		return errors.New("use either --url or --tab, not both")
-	}
-	if !*newTab && *targetURL == "" && *targetRef == "" {
-		return errors.New("one of --url, --tab, or --new is required")
 	}
 	st, err := store.Load()
 	if err != nil {
@@ -60,7 +68,7 @@ func cmdConnect(args []string) error {
 	var target cdp.TargetInfo
 	switch {
 	case *newTab:
-		tab, err := cdp.CreateTarget(ctx, *host, *port, *newURL)
+		tab, err := cdp.CreateTarget(ctx, *host, *port, targetURL)
 		if err != nil {
 			return err
 		}
@@ -68,7 +76,7 @@ func cmdConnect(args []string) error {
 			tab = latest
 		}
 		if tab.URL == "" {
-			tab.URL = *newURL
+			tab.URL = targetURL
 		}
 		if *activate {
 			if err := cdp.ActivateTarget(ctx, *host, *port, tab.ID); err != nil {
@@ -94,9 +102,9 @@ func cmdConnect(args []string) error {
 		if err != nil {
 			return fmt.Errorf("list targets failed (check with 'cdp tabs list --host %s --port %d'): %w", *host, *port, err)
 		}
-		found, ok := cdp.FindTarget(targets, *targetURL)
+		found, ok := cdp.FindTarget(targets, targetURL)
 		if !ok {
-			return fmt.Errorf("no target matching %s (run 'cdp tabs list --host %s --port %d' to confirm)", *targetURL, *host, *port)
+			return fmt.Errorf("no target matching %s (run 'cdp tabs list --host %s --port %d' to confirm)", targetURL, *host, *port)
 		}
 		target = found
 	}
@@ -136,6 +144,52 @@ func cmdConnect(args []string) error {
 	}
 	fmt.Printf("Connected %s -> %s (%s)%s\n", name, formatTargetTitle(target), target.URL, formatPageIssueSuffix(issue))
 	return nil
+}
+
+type connectURL struct {
+	source string
+	value  string
+}
+
+// Resolve aliases before contacting the browser. Keep every supplied URL so a
+// repeated flag cannot silently replace a different target.
+func resolveConnectURL(pos []string, urls []connectURL, newTab bool, targetRef string) (string, error) {
+	if len(pos) > 1 {
+		return "", errors.New("connect accepts one positional URL; use --new <url> to open it or <url> to match an existing tab")
+	}
+	if len(pos) == 1 {
+		if strings.HasPrefix(pos[0], "-") {
+			return "", fmt.Errorf("unexpected argument: %s (see 'cdp connect --help')", pos[0])
+		}
+		urls = append(urls, connectURL{"positional URL", pos[0]})
+	}
+	if newTab && targetRef != "" {
+		return "", errors.New("--new cannot be combined with --tab; use --new <url> to open a tab or --tab <index|id|pattern> to select an existing tab")
+	}
+	for _, u := range urls {
+		if u.source == "--new-url" && !newTab {
+			return "", errors.New("--new-url requires --new; use --new <url> to open a tab or --url <url> to match an existing tab")
+		}
+		if strings.TrimSpace(u.value) == "" {
+			return "", fmt.Errorf("%s must not be empty; use --new without a URL to open about:blank", u.source)
+		}
+		if u.value != urls[0].value {
+			return "", fmt.Errorf("conflicting URLs: %s %q and %s %q; supply one URL (or repeat the same URL)", urls[0].source, urls[0].value, u.source, u.value)
+		}
+	}
+	if targetRef != "" && len(urls) > 0 {
+		return "", errors.New("--tab cannot be combined with a URL; use either --tab <index|id|pattern> or a URL to select an existing tab")
+	}
+	if len(urls) > 0 {
+		return urls[0].value, nil
+	}
+	if newTab {
+		return "about:blank", nil
+	}
+	if targetRef == "" {
+		return "", errors.New("a URL, --tab <index|id|pattern>, or --new [<url>] is required")
+	}
+	return "", nil
 }
 
 func cmdKeepAlive(args []string) error {
